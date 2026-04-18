@@ -1,6 +1,2 @@
-streamlit
-pandas
-numpy
-requests
-pytz
-scipy
+fastapi
+uvicorn
