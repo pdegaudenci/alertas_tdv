@@ -52,7 +52,14 @@ def validate_secret(x_webhook_secret: Optional[str]) -> None:
     if expected_secret and x_webhook_secret != expected_secret:
         raise HTTPException(status_code=401, detail="Unauthorized webhook secret")
 
+LAST_ALERT = {
+    "ok": False,
+    "message": "No alerts received yet"
+}
 
+@app.get("/api/latest")
+async def latest_alert():
+    return LAST_ALERT
 @app.get("/")
 async def healthcheck():
     return {
