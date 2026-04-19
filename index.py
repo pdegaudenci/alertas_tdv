@@ -42,6 +42,7 @@ def build_log(route: str, payload: dict, headers: dict | None = None) -> dict:
         "side": payload.get("side"),
         "payload": payload,
         "headers": headers or {},
+       
     }
 
 
