@@ -84,8 +84,8 @@ BINANCE_BASE_URLS = [
     "https://api.binance.com"
 ]
 WEBHOOK_SECRET_ENV = os.getenv("WEBHOOK_SECRET", "")
-VALIDATION_THRESHOLD = float(os.getenv("VALIDATION_THRESHOLD", "0.62"))  # probability threshold
-MIN_SCORE_THRESHOLD = float(os.getenv("MIN_SCORE_THRESHOLD", "55"))      # score threshold
+VALIDATION_THRESHOLD = float(os.getenv("VALIDATION_THRESHOLD", "0.62"))
+MIN_SCORE_THRESHOLD = float(os.getenv("MIN_SCORE_THRESHOLD", "55"))
 REQUEST_TIMEOUT_SEC = float(os.getenv("REQUEST_TIMEOUT_SEC", "8.0"))
 
 # Optional ML hook
@@ -1610,16 +1610,6 @@ async def healthcheck():
         "model_loaded": SKLEARN_MODEL is not None,
         "allowed_origins": allowed_origins,
     }
-@app.get("/api/alerts")
-async def get_alerts(limit: int = 50):
-    items = list(ALERT_HISTORY)[-limit:]
-    items.reverse()
-    return {
-        "ok": True,
-        "count": len(items),
-        "items": items
-    }
-
 
 @app.get("/api/validation/latest")
 async def get_latest_validation():
