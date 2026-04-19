@@ -107,6 +107,8 @@ async def tradingview_webhook(
     request: Request,
     x_webhook_secret: Optional[str] = Header(default=None)
 ):
+    global LAST_ALERT
+
     validate_secret(x_webhook_secret)
 
     raw_body = await request.body()
@@ -120,15 +122,33 @@ async def tradingview_webhook(
             "user_agent": request.headers.get("user-agent", ""),
         },
     )
+
     print(json.dumps(log_data, ensure_ascii=False))
+
+    # GUARDAR ÚLTIMA ALERTA
+    LAST_ALERT = {
+        "ok": True,
+        "received_at": utc_now_iso(),
+        "route": "/api/webhook",
+        "symbol": payload.get("symbol") or payload.get("ticker"),
+        "timeframe": payload.get("timeframe") or payload.get("tf"),
+        "event": payload.get("event"),
+        "setup": payload.get("setup"),
+        "phase": payload.get("phase"),
+        "strength": payload.get("strength"),
+        "phase_5m": payload.get("phase_5m"),
+        "strength_5m": payload.get("strength_5m"),
+        "quality_score": payload.get("quality_score") or payload.get("score"),
+        "price": payload.get("price"),
+        "side": payload.get("side"),
+        "payload": payload,
+    }
 
     return JSONResponse(
         status_code=200,
         content={
             "ok": True,
             "message": "Alert received",
-            "received_at": utc_now_iso(),
-            "route": "/api/webhook",
-            "payload": payload,
+            "data": LAST_ALERT
         },
     )
