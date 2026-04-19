@@ -8,17 +8,41 @@ import os
 import json
 import math
 import asyncio
-
+import time
 import httpx
 import numpy as np
 import pandas as pd
 from scipy.special import expit
-
+import logging
+import traceback
 # ============================================================
 # APP
 # ============================================================
 app = FastAPI(title="TradingView Validation Layer", version="1.0.0")
 
+# ==========================================================
+# LOGGER JSON PARA VERCEL
+# ==========================================================
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+logger = logging.getLogger("validation-layer")
+
+
+def log_event(event_type: str, data: dict):
+    try:
+        payload = {
+            "log_type": event_type,
+            "timestamp": utc_now_iso(),
+            "data": data
+        }
+        logger.info(json.dumps(payload, ensure_ascii=False, default=str))
+    except Exception as e:
+        logger.info(
+            json.dumps({
+                "log_type": "log_error",
+                "timestamp": utc_now_iso(),
+                "error": str(e)
+            })
+        )
 # ============================================================
 # CORS - Streamlit / dashboards
 # ============================================================
@@ -1307,77 +1331,146 @@ async def tradingview_webhook(
 ):
     global LAST_ALERT, LAST_VALIDATION, ALERT_HISTORY
 
-    validate_secret(x_webhook_secret)
-
-    raw_body = await request.body()
-    payload = parse_payload(raw_body)
-
-    log_data = build_log(
-        route="/api/webhook",
-        payload=payload,
-        headers={
-            "content_type": request.headers.get("content-type", ""),
-            "user_agent": request.headers.get("user-agent", ""),
-        },
-    )
-
-    print(json.dumps(log_data, ensure_ascii=False))
-
-    validation_result = None
     try:
-        validation_result = await run_validation(payload)
-        LAST_VALIDATION = validation_result
-    except Exception as e:
-        validation_result = {
-            "ok": False,
-            "validated_at": utc_now_iso(),
-            "message": "Validation failed",
-            "error": str(e)
+        t0_total = time.perf_counter()
+        validate_secret(x_webhook_secret)
+
+        raw_body = await request.body()
+        t0_parse = time.perf_counter()
+        payload = parse_payload(raw_body)
+        parse_ms = round((time.perf_counter() - t0_parse) * 1000, 2)
+        log_event("metric_parse_time", {"ms": parse_ms})
+        log_event("webhook_received", {
+            "headers": {
+                "content_type": request.headers.get("content-type"),
+                "user_agent": request.headers.get("user-agent")
+            },
+            "payload": payload
+        })
+
+        log_data = build_log(
+            route="/api/webhook",
+            payload=payload,
+            headers={
+                "content_type": request.headers.get("content-type", ""),
+                "user_agent": request.headers.get("user-agent", ""),
+            },
+        )
+
+        print(json.dumps(log_data, ensure_ascii=False))
+
+        validation_result = None
+
+        try:
+            t0_validation = time.perf_counter()
+            validation_result = await run_validation(payload)
+            validation_ms = round((time.perf_counter() - t0_validation) * 1000, 2)
+
+            log_event("metric_validation_time", {
+                "ms": validation_ms
+            })
+            LAST_VALIDATION = validation_result
+
+            log_event("validation_result", validation_result)
+
+        except Exception as e:
+            validation_result = {
+                "ok": False,
+                "validated_at": utc_now_iso(),
+                "message": "Validation failed",
+                "error": str(e)
+            }
+
+            LAST_VALIDATION = validation_result
+
+            log_event("validation_error", {
+                "error": str(e),
+                "payload": payload,
+                "validation_result": validation_result
+            })
+
+        signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
+        context = payload.get("context", {}) if isinstance(payload.get("context"), dict) else {}
+        quality = payload.get("quality", {}) if isinstance(payload.get("quality"), dict) else {}
+        htf_context = payload.get("htf_context", {}) if isinstance(payload.get("htf_context"), dict) else {}
+
+        LAST_ALERT = {
+            "ok": True,
+            "received_at": utc_now_iso(),
+            "route": "/api/webhook",
+            "schema_version": payload.get("schema_version"),
+            "message_type": payload.get("message_type"),
+            "symbol": signal.get("symbol") or payload.get("symbol") or payload.get("ticker"),
+            "timeframe": signal.get("tf") or payload.get("timeframe") or payload.get("tf"),
+            "event": signal.get("event") or payload.get("event"),
+            "setup": signal.get("setup") or payload.get("setup"),
+            "phase": context.get("phase"),
+            "regime": context.get("regime"),
+            "strength": context.get("phase_strength") or payload.get("strength"),
+            "phase_5m": htf_context.get("htf_phase") or payload.get("phase_5m"),
+            "strength_5m": htf_context.get("htf_phase_strength") or payload.get("strength_5m"),
+            "quality_score": quality.get("quality_score") or payload.get("quality_score") or payload.get("score"),
+            "price": signal.get("price") or payload.get("price"),
+            "side": signal.get("side") or payload.get("side"),
+
+            # payload completo
+            "payload": payload,
+
+            # validación completa
+            "validation": validation_result,
         }
-        LAST_VALIDATION = validation_result
 
-    signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
-    context = payload.get("context", {}) if isinstance(payload.get("context"), dict) else {}
-    quality = payload.get("quality", {}) if isinstance(payload.get("quality"), dict) else {}
-    htf_context = payload.get("htf_context", {}) if isinstance(payload.get("htf_context"), dict) else {}
+        log_event("last_alert_updated", LAST_ALERT)
 
-    LAST_ALERT = {
-        "ok": True,
-        "received_at": utc_now_iso(),
-        "route": "/api/webhook",
-        "schema_version": payload.get("schema_version"),
-        "message_type": payload.get("message_type"),
-        "symbol": signal.get("symbol") or payload.get("symbol") or payload.get("ticker"),
-        "timeframe": signal.get("tf") or payload.get("timeframe") or payload.get("tf"),
-        "event": signal.get("event") or payload.get("event"),
-        "setup": signal.get("setup") or payload.get("setup"),
-        "phase": context.get("phase"),
-        "regime": context.get("regime"),
-        "strength": context.get("phase_strength") or payload.get("strength"),
-        "phase_5m": htf_context.get("htf_phase") or payload.get("phase_5m"),
-        "strength_5m": htf_context.get("htf_phase_strength") or payload.get("strength_5m"),
-        "quality_score": quality.get("quality_score") or payload.get("quality_score") or payload.get("score"),
-        "price": signal.get("price") or payload.get("price"),
-        "side": signal.get("side") or payload.get("side"),
+        history_item = build_history_item(payload, validation_result)
+        ALERT_HISTORY.append(history_item)
 
-        # payload completo
-        "payload": payload,
+        log_event("history_item_appended", {
+            "history_size": len(ALERT_HISTORY),
+            "history_item": history_item
+        })
 
-        # validación completa
-        "validation": validation_result,
-    }
-
-    history_item = build_history_item(payload, validation_result)
-    ALERT_HISTORY.append(history_item)
-
-    return JSONResponse(
-        status_code=200,
-        content={
+        response_content = {
             "ok": True,
             "message": "Alert received and processed",
             "data": LAST_ALERT,
-        },
-    )
+        }
+
+        log_event("webhook_response", response_content)
+
+        return JSONResponse(
+            status_code=200,
+            content=response_content,
+        )
+
+    except HTTPException as e:
+        log_event("webhook_http_exception", {
+            "status_code": e.status_code,
+            "detail": e.detail
+        })
+        raise
+
+    except Exception as e:
+        error_response = {
+            "ok": False,
+            "message": "Unhandled webhook processing error",
+            "error": str(e),
+            "received_at": utc_now_iso()
+        }
+
+        log_event("webhook_unhandled_exception", {
+            "error": str(e),
+            "response": error_response
+        })
+        total_ms = round((time.perf_counter() - t0_total) * 1000, 2)
+
+        log_event("metric_total_processing_time", {
+            "ms": total_ms
+        })
+        return JSONResponse(
+            status_code=500,
+            content=error_response
+        )
 
 @app.post("/")
 async def root_webhook(
