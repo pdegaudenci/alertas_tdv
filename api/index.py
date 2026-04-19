@@ -1743,12 +1743,20 @@ async def validate_payload(
     log_event("validate_endpoint_response", safe_result)
 
     return JSONResponse(status_code=200, content=safe_result)
+DEBUG_WEBHOOK_ECHO = False
 
 @app.post("/api/webhook")
 async def tradingview_webhook(
     request: Request,
     x_webhook_secret: Optional[str] = Header(default=None)
 ):
+    raw_body = await request.body()
+
+    if DEBUG_WEBHOOK_ECHO:
+        return {
+            "ok": True,
+            "received": raw_body.decode("utf-8", errors="replace")
+        }
     global LAST_ALERT, LAST_VALIDATION, ALERT_HISTORY
 
     try:
