@@ -1897,7 +1897,15 @@ async def tradingview_webhook(
             status_code=500,
             content=error_response
         )
-
+@app.get("/api/alerts")
+async def get_alerts(limit: int = 50):
+    items = list(ALERT_HISTORY)[-limit:]
+    items.reverse()
+    return {
+        "ok": True,
+        "count": len(items),
+        "items": items
+    }
 @app.post("/")
 async def root_webhook(
     request: Request,
