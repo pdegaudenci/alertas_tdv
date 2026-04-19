@@ -41,15 +41,17 @@ app.add_middleware(
 # ============================================================
 # GLOBAL STATE
 # ============================================================
-LAST_ALERT: Dict[str, Any] = {
+LAST_ALERT = {
     "ok": False,
     "message": "No alerts received yet"
 }
-ALERT_HISTORY = deque(maxlen=200)
+
 LAST_VALIDATION = {
     "ok": False,
     "message": "No validations yet"
 }
+
+ALERT_HISTORY = deque(maxlen=200)
 # ============================================================
 # CONFIG
 # ============================================================
@@ -1222,10 +1224,7 @@ def build_history_item(payload: dict, validation_result: dict | None = None) -> 
         "score_external": validation.get("score_external"),
         "reason": validation.get("reason", []),
         "penalties": validation.get("penalties", []),
-        "validation": validation,
-        "payload": payload
     }
-
 # ============================================================
 # ROUTES
 # ============================================================
@@ -1360,7 +1359,11 @@ async def tradingview_webhook(
         "quality_score": quality.get("quality_score") or payload.get("quality_score") or payload.get("score"),
         "price": signal.get("price") or payload.get("price"),
         "side": signal.get("side") or payload.get("side"),
+
+        # payload completo
         "payload": payload,
+
+        # validación completa
         "validation": validation_result,
     }
 
