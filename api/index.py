@@ -1751,7 +1751,11 @@ async def tradingview_webhook(
     x_webhook_secret: Optional[str] = Header(default=None)
 ):
     raw_body = await request.body()
-
+    raw_text = raw_body.decode("utf-8", errors="replace")
+    
+    log_event("webhook_raw_body", {
+        "raw_body": raw_text
+    })
     if DEBUG_WEBHOOK_ECHO:
         return {
             "ok": True,
