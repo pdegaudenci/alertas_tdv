@@ -1750,36 +1750,56 @@ async def tradingview_webhook(
     request: Request,
     x_webhook_secret: Optional[str] = Header(default=None)
 ):
-    raw_body = await request.body()
-    raw_text = raw_body.decode("utf-8", errors="replace")
-    
-    log_event("webhook_raw_body", {
-        "raw_body": raw_text
-    })
-    if DEBUG_WEBHOOK_ECHO:
-        return {
-            "ok": True,
-            "received": raw_body.decode("utf-8", errors="replace")
-        }
     global LAST_ALERT, LAST_VALIDATION, ALERT_HISTORY
 
     try:
         t0_total = time.perf_counter()
+
+        # ------------------------------------------------------------
+        # STEP 0 - AUTH
+        # ------------------------------------------------------------
         validate_secret(x_webhook_secret)
+        log_event("step_0_secret_validated", {
+            "has_secret_header": x_webhook_secret is not None
+        })
 
+        # ------------------------------------------------------------
+        # STEP 1 - RAW BODY
+        # ------------------------------------------------------------
         raw_body = await request.body()
+        raw_text = raw_body.decode("utf-8", errors="replace")
 
+        log_event("step_1_raw_received", {
+            "headers": {
+                "content_type": request.headers.get("content-type", ""),
+                "user_agent": request.headers.get("user-agent", "")
+            },
+            "raw_body_text": raw_text
+        })
+
+        # Debug opcional: activar con ?debug=1
+        debug_mode = str(request.query_params.get("debug", "0")).lower() in {"1", "true", "yes"}
+        if debug_mode:
+            debug_response = sanitize_for_json({
+                "ok": True,
+                "message": "Webhook debug echo",
+                "received_at": utc_now_iso(),
+                "raw_body_text": raw_text
+            })
+            log_event("step_debug_echo_return", debug_response)
+            return JSONResponse(status_code=200, content=debug_response)
+
+        # ------------------------------------------------------------
+        # STEP 2 - PARSE + ASSEMBLE
+        # ------------------------------------------------------------
         t0_parse = time.perf_counter()
         payload_raw = parse_payload(raw_body)
         payload = assemble_event_payload(payload_raw)
         parse_ms = round((time.perf_counter() - t0_parse) * 1000, 2)
+
         log_event("metric_parse_time", {"ms": parse_ms})
 
-        log_event("webhook_received", {
-            "headers": {
-                "content_type": request.headers.get("content-type"),
-                "user_agent": request.headers.get("user-agent")
-            },
+        log_event("step_2_payload_parsed", {
             "payload_raw": payload_raw,
             "payload_assembled": payload
         })
@@ -1792,16 +1812,33 @@ async def tradingview_webhook(
                 "user_agent": request.headers.get("user-agent", ""),
             },
         )
+        log_event("step_2_build_log", log_data)
 
-        log_event("webhook_build_log", log_data)
-
+        # ------------------------------------------------------------
+        # STEP 3 - VALIDATION
+        # ------------------------------------------------------------
         validation_result = None
 
         try:
             t0_validation = time.perf_counter()
+
             if should_validate_payload(payload):
+                log_event("step_3_validation_start", {
+                    "should_validate": True,
+                    "message_type": payload.get("message_type"),
+                    "event_uid": payload.get("event_uid"),
+                    "event": nested_get(payload, "signal", "event"),
+                    "side": nested_get(payload, "signal", "side"),
+                    "symbol": nested_get(payload, "signal", "symbol")
+                })
                 validation_result = await run_validation(payload)
             else:
+                log_event("step_3_validation_skipped", {
+                    "should_validate": False,
+                    "message_type": payload.get("message_type"),
+                    "event_uid": payload.get("event_uid"),
+                    "event": nested_get(payload, "signal", "event")
+                })
                 validation_result = {
                     "ok": True,
                     "validated_at": utc_now_iso(),
@@ -1816,12 +1853,15 @@ async def tradingview_webhook(
                         "event_type": nested_get(payload, "signal", "event")
                     }
                 }
-            validation_ms = round((time.perf_counter() - t0_validation) * 1000, 2)
 
+            validation_ms = round((time.perf_counter() - t0_validation) * 1000, 2)
             log_event("metric_validation_time", {"ms": validation_ms})
 
             LAST_VALIDATION = sanitize_for_json(validation_result)
-            log_event("validation_result", LAST_VALIDATION)
+
+            log_event("step_3_validation_done", {
+                "validation_result": LAST_VALIDATION
+            })
 
         except Exception as e:
             validation_result = {
@@ -1833,13 +1873,16 @@ async def tradingview_webhook(
 
             LAST_VALIDATION = sanitize_for_json(validation_result)
 
-            log_event("validation_error", {
+            log_event("step_3_validation_error", {
                 "error": str(e),
                 "traceback": traceback.format_exc(),
                 "payload": payload,
                 "validation_result": LAST_VALIDATION
             })
 
+        # ------------------------------------------------------------
+        # STEP 4 - BUILD LAST_ALERT
+        # ------------------------------------------------------------
         signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
         context = payload.get("context", {}) if isinstance(payload.get("context"), dict) else {}
         quality = payload.get("quality", {}) if isinstance(payload.get("quality"), dict) else {}
@@ -1851,6 +1894,7 @@ async def tradingview_webhook(
             "route": "/api/webhook",
             "schema_version": payload.get("schema_version"),
             "message_type": payload.get("message_type"),
+            "event_uid": payload.get("event_uid"),
             "symbol": signal.get("symbol") or payload.get("symbol") or payload.get("ticker"),
             "timeframe": signal.get("tf") or payload.get("timeframe") or payload.get("tf"),
             "event": signal.get("event") or payload.get("event"),
@@ -1867,16 +1911,22 @@ async def tradingview_webhook(
             "validation": LAST_VALIDATION,
         })
 
-        log_event("last_alert_updated", LAST_ALERT)
+        log_event("step_4_last_alert_updated", LAST_ALERT)
 
+        # ------------------------------------------------------------
+        # STEP 5 - HISTORY
+        # ------------------------------------------------------------
         history_item = sanitize_for_json(build_history_item(payload, LAST_VALIDATION))
         ALERT_HISTORY.append(history_item)
 
-        log_event("history_item_appended", {
+        log_event("step_5_history_appended", {
             "history_size": len(ALERT_HISTORY),
             "history_item": history_item
         })
 
+        # ------------------------------------------------------------
+        # STEP 6 - RESPONSE
+        # ------------------------------------------------------------
         total_ms = round((time.perf_counter() - t0_total) * 1000, 2)
         log_event("metric_total_processing_time", {"ms": total_ms})
 
@@ -1886,7 +1936,7 @@ async def tradingview_webhook(
             "data": LAST_ALERT,
         })
 
-        log_event("webhook_response", response_content)
+        log_event("step_6_response_sent", response_content)
 
         return JSONResponse(
             status_code=200,
@@ -1896,7 +1946,8 @@ async def tradingview_webhook(
     except HTTPException as e:
         log_event("webhook_http_exception", {
             "status_code": e.status_code,
-            "detail": e.detail
+            "detail": e.detail,
+            "traceback": traceback.format_exc()
         })
         raise
 
@@ -1911,31 +1962,6 @@ async def tradingview_webhook(
         log_event("webhook_unhandled_exception", {
             "error": str(e),
             "traceback": traceback.format_exc(),
-            "response": error_response
-        })
-
-        return JSONResponse(
-            status_code=500,
-            content=error_response
-        )
-
-    except HTTPException as e:
-        log_event("webhook_http_exception", {
-            "status_code": e.status_code,
-            "detail": e.detail
-        })
-        raise
-
-    except Exception as e:
-        error_response = {
-            "ok": False,
-            "message": "Unhandled webhook processing error",
-            "error": str(e),
-            "received_at": utc_now_iso()
-        }
-
-        log_event("webhook_unhandled_exception", {
-            "error": str(e),
             "response": error_response
         })
 
