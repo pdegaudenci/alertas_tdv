@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-
+from collections import deque
 from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime, timezone
 import os
@@ -45,7 +45,11 @@ LAST_ALERT: Dict[str, Any] = {
     "ok": False,
     "message": "No alerts received yet"
 }
-
+ALERT_HISTORY = deque(maxlen=200)
+LAST_VALIDATION = {
+    "ok": False,
+    "message": "No validations yet"
+}
 # ============================================================
 # CONFIG
 # ============================================================
@@ -1189,6 +1193,38 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
             "quality_class_alert": normalized["quality_class_alert"],
         }
     }
+def build_history_item(payload: dict, validation_result: dict | None = None) -> dict:
+    signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
+    context = payload.get("context", {}) if isinstance(payload.get("context"), dict) else {}
+    quality = payload.get("quality", {}) if isinstance(payload.get("quality"), dict) else {}
+    htf_context = payload.get("htf_context", {}) if isinstance(payload.get("htf_context"), dict) else {}
+
+    validation = validation_result.get("validation", {}) if isinstance(validation_result, dict) else {}
+
+    return {
+        "received_at": utc_now_iso(),
+        "schema_version": payload.get("schema_version"),
+        "message_type": payload.get("message_type"),
+        "symbol": signal.get("symbol") or payload.get("symbol") or payload.get("ticker"),
+        "tf": signal.get("tf") or payload.get("tf") or payload.get("timeframe"),
+        "event": signal.get("event") or payload.get("event"),
+        "side": signal.get("side") or payload.get("side"),
+        "setup": signal.get("setup") or payload.get("setup"),
+        "price": signal.get("price") or payload.get("price"),
+        "phase": context.get("phase"),
+        "regime": context.get("regime"),
+        "quality_score": quality.get("quality_score") or payload.get("quality_score") or payload.get("score"),
+        "htf_phase": htf_context.get("htf_phase"),
+        "htf_phase_strength": htf_context.get("htf_phase_strength"),
+        "approve": validation.get("approve"),
+        "confidence": validation.get("confidence"),
+        "probability_tp_before_sl": validation.get("probability_tp_before_sl"),
+        "score_external": validation.get("score_external"),
+        "reason": validation.get("reason", []),
+        "penalties": validation.get("penalties", []),
+        "validation": validation,
+        "payload": payload
+    }
 
 # ============================================================
 # ROUTES
@@ -1210,7 +1246,20 @@ async def healthcheck():
         "model_loaded": SKLEARN_MODEL is not None,
         "allowed_origins": allowed_origins,
     }
+@app.get("/api/alerts")
+async def get_alerts(limit: int = 50):
+    items = list(ALERT_HISTORY)[-limit:]
+    items.reverse()
+    return {
+        "ok": True,
+        "count": len(items),
+        "items": items
+    }
 
+
+@app.get("/api/validation/latest")
+async def get_latest_validation():
+    return LAST_VALIDATION
 @app.get("/api/latest")
 async def latest_alert():
     return LAST_ALERT
@@ -1257,7 +1306,7 @@ async def tradingview_webhook(
     request: Request,
     x_webhook_secret: Optional[str] = Header(default=None)
 ):
-    global LAST_ALERT
+    global LAST_ALERT, LAST_VALIDATION, ALERT_HISTORY
 
     validate_secret(x_webhook_secret)
 
@@ -1272,11 +1321,13 @@ async def tradingview_webhook(
             "user_agent": request.headers.get("user-agent", ""),
         },
     )
+
     print(json.dumps(log_data, ensure_ascii=False))
 
     validation_result = None
     try:
         validation_result = await run_validation(payload)
+        LAST_VALIDATION = validation_result
     except Exception as e:
         validation_result = {
             "ok": False,
@@ -1284,6 +1335,7 @@ async def tradingview_webhook(
             "message": "Validation failed",
             "error": str(e)
         }
+        LAST_VALIDATION = validation_result
 
     signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
     context = payload.get("context", {}) if isinstance(payload.get("context"), dict) else {}
@@ -1311,6 +1363,9 @@ async def tradingview_webhook(
         "payload": payload,
         "validation": validation_result,
     }
+
+    history_item = build_history_item(payload, validation_result)
+    ALERT_HISTORY.append(history_item)
 
     return JSONResponse(
         status_code=200,
