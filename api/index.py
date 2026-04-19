@@ -32,7 +32,7 @@ def log_event(event_type: str, data: dict):
         payload = {
             "log_type": event_type,
             "timestamp": utc_now_iso(),
-            "data": data
+            "data": sanitize_for_json(data)
         }
         logger.info(json.dumps(payload, ensure_ascii=False, default=str))
     except Exception as e:
@@ -107,6 +107,52 @@ except Exception:
 # ============================================================
 # UTILS
 # ============================================================
+def is_bad_number(value: Any) -> bool:
+    try:
+        if isinstance(value, (float, np.floating)):
+            v = float(value)
+            return math.isnan(v) or math.isinf(v)
+        return False
+    except Exception:
+        return False
+
+
+def sanitize_for_json(value: Any) -> Any:
+    """
+    Convierte NaN/Inf a None y normaliza tipos numpy/pandas
+    para que JSONResponse no falle.
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, (str, bool, int)):
+        return value
+
+    if isinstance(value, (float, np.floating)):
+        v = float(value)
+        if math.isnan(v) or math.isinf(v):
+            return None
+        return v
+
+    if isinstance(value, (np.integer,)):
+        return int(value)
+
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+
+    if isinstance(value, dict):
+        return {str(k): sanitize_for_json(v) for k, v in value.items()}
+
+    if isinstance(value, (list, tuple, set)):
+        return [sanitize_for_json(v) for v in value]
+
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+
+    return value
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -1241,9 +1287,9 @@ def build_analysis_outputs(
 async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
     signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
     event = str(signal.get("event") or payload.get("event") or "").upper()
-    
+
     if event not in {"LONG_ENTRY", "SHORT_ENTRY", "REAL_LONG_ENTRY", "REAL_SHORT_ENTRY"}:
-        return {
+        result = {
             "ok": True,
             "validated_at": utc_now_iso(),
             "message": "Validation skipped for non-entry event",
@@ -1254,9 +1300,37 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "score_external": None,
                 "reason": [f"event_skipped:{event}"],
                 "penalties": [],
-                "event_type": event
+                "event_type": event,
+                "validation_steps": {
+                    "event_gate": build_validation_step(
+                        ok=False,
+                        reason=f"event {event} is not an entry event",
+                        details={
+                            "event": event,
+                            "entry_events_allowed": [
+                                "LONG_ENTRY",
+                                "SHORT_ENTRY",
+                                "REAL_LONG_ENTRY",
+                                "REAL_SHORT_ENTRY"
+                            ]
+                        }
+                    )
+                },
+                "analysis_trace": [
+                    f"Evento recibido: {event}.",
+                    "No es un evento de entrada, por lo tanto no se ejecuta validación completa."
+                ],
+                "analysis_summary": {
+                    "market_context": "No evaluado para este tipo de evento.",
+                    "execution_quality": "No evaluada para este tipo de evento.",
+                    "risk_reading": "No aplica.",
+                    "final_conclusion": f"Validación omitida para evento {event}.",
+                    "score_comment": "No se calculó score externo."
+                }
             }
         }
+        return sanitize_for_json(result)
+
     normalized = normalize_alert(payload)
 
     if normalized["side"] not in {"long", "short"}:
@@ -1289,14 +1363,13 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
         backend_features=ext["backend_feature_pack"],
         score_external=ext["score_external"]
     )
+
     validation_steps = {}
-    
-    # ------------------------------------------------------------
+
     # EVENT GATE
-    # ------------------------------------------------------------
     event_upper = str(normalized.get("event", "")).upper()
     entry_events = {"LONG_ENTRY", "SHORT_ENTRY", "REAL_LONG_ENTRY", "REAL_SHORT_ENTRY"}
-    
+
     validation_steps["event_gate"] = build_validation_step(
         ok=event_upper in entry_events,
         reason=(
@@ -1309,10 +1382,8 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
             "entry_events_allowed": sorted(list(entry_events))
         }
     )
-    
-    # ------------------------------------------------------------
+
     # CONTEXT VALIDATION
-    # ------------------------------------------------------------
     context_ok = "htf_aligned" in ext["reasons"] or "ema_trend_aligned" in ext["reasons"]
     validation_steps["context_validation"] = build_validation_step(
         ok=context_ok,
@@ -1332,10 +1403,8 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
             "vwap_1m": f1["vwap_session"]
         }
     )
-    
-    # ------------------------------------------------------------
+
     # MICROSTRUCTURE VALIDATION
-    # ------------------------------------------------------------
     micro_ok = (
         safe_float(market["order_book"].get("spread_bps"), 999.0) <= 2.5 and
         (
@@ -1359,10 +1428,8 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
             "vacuum_below": market["order_book"].get("vacuum_below"),
         }
     )
-    
-    # ------------------------------------------------------------
+
     # FLOW VALIDATION
-    # ------------------------------------------------------------
     flow_ok = (
         (normalized["side"] == "long" and safe_float(market["flow"].get("delta_qty"), 0.0) > 0.0) or
         (normalized["side"] == "short" and safe_float(market["flow"].get("delta_qty"), 0.0) < 0.0)
@@ -1381,10 +1448,8 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
             "trade_count": market["flow"].get("trade_count")
         }
     )
-    
-    # ------------------------------------------------------------
+
     # TP ROOM VALIDATION
-    # ------------------------------------------------------------
     tp_room_ok = ext["backend_feature_pack"].get("tp_room_ok", 0.0) > 0
     validation_steps["tp_room_validation"] = build_validation_step(
         ok=tp_room_ok,
@@ -1401,10 +1466,8 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
             "distance_to_tp_pct_alert": normalized.get("distance_to_tp_pct_alert")
         }
     )
-    
-    # ------------------------------------------------------------
+
     # EXTENSION VALIDATION
-    # ------------------------------------------------------------
     extension_ok = not normalized.get("too_extended_block_alert", False) and not normalized.get("late_trend_alert", False)
     validation_steps["extension_validation"] = build_validation_step(
         ok=extension_ok,
@@ -1419,11 +1482,9 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
             "late_trend_alert": normalized.get("late_trend_alert")
         }
     )
-    
-    # ------------------------------------------------------------
+
     # PROBABILITY VALIDATION
-    # ------------------------------------------------------------
-    tp_prob_ok = prob["probability_tp_before_sl"] >= VALIDATION_THRESHOLD
+    tp_prob_ok = safe_float(prob.get("probability_tp_before_sl"), 0.0) >= VALIDATION_THRESHOLD
     validation_steps["tp_probability_validation"] = build_validation_step(
         ok=tp_prob_ok,
         reason=(
@@ -1432,18 +1493,16 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
             else "probability to hit TP before SL is below threshold"
         ),
         details={
-            "probability_tp_before_sl": prob["probability_tp_before_sl"],
+            "probability_tp_before_sl": prob.get("probability_tp_before_sl"),
             "threshold": VALIDATION_THRESHOLD,
-            "barrier_component": prob["barrier_component"],
-            "technical_component": prob["technical_component"],
-            "ml_component": prob["ml_component"]
+            "barrier_component": prob.get("barrier_component"),
+            "technical_component": prob.get("technical_component"),
+            "ml_component": prob.get("ml_component")
         }
     )
-    
-    # ------------------------------------------------------------
+
     # SCORE VALIDATION
-    # ------------------------------------------------------------
-    score_ok = ext["score_external"] >= MIN_SCORE_THRESHOLD
+    score_ok = safe_float(ext.get("score_external"), 0.0) >= MIN_SCORE_THRESHOLD
     validation_steps["score_validation"] = build_validation_step(
         ok=score_ok,
         reason=(
@@ -1452,22 +1511,24 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
             else "external score below minimum threshold"
         ),
         details={
-            "score_external": ext["score_external"],
+            "score_external": ext.get("score_external"),
             "threshold": MIN_SCORE_THRESHOLD,
-            "reasons": ext["reasons"],
-            "penalties": ext["penalties"]
+            "reasons": ext.get("reasons", []),
+            "penalties": ext.get("penalties", [])
         }
     )
+
     approve = bool(
-        prob["probability_tp_before_sl"] >= VALIDATION_THRESHOLD and
-        ext["score_external"] >= MIN_SCORE_THRESHOLD and
+        safe_float(prob.get("probability_tp_before_sl"), 0.0) >= VALIDATION_THRESHOLD and
+        safe_float(ext.get("score_external"), 0.0) >= MIN_SCORE_THRESHOLD and
         not normalized.get("too_extended_block_alert", False)
     )
+
     analysis_trace, analysis_summary = build_analysis_outputs(
         normalized_alert=normalized,
         validation_steps=validation_steps,
-        probability_tp_before_sl=prob["probability_tp_before_sl"],
-        score_external=ext["score_external"],
+        probability_tp_before_sl=safe_float(prob.get("probability_tp_before_sl"), 0.0),
+        score_external=safe_float(ext.get("score_external"), 0.0),
         approve=approve
     )
 
@@ -1476,8 +1537,9 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
         "trace": analysis_trace,
         "summary": analysis_summary
     })
-    confidence = round(prob["probability_tp_before_sl"] * 100.0, 2)
-    entry_price = normalized["entry_price"] if normalized["entry_price"] > 0 else f1["close"]
+
+    confidence = round(safe_float(prob.get("probability_tp_before_sl"), 0.0) * 100.0, 2)
+    entry_price = normalized["entry_price"] if safe_float(normalized["entry_price"], 0.0) > 0 else f1["close"]
 
     validation = {
         "approve": approve,
@@ -1486,46 +1548,51 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
         "symbol": normalized["symbol"],
         "event": normalized["event"],
         "entry_price": entry_price,
-        "tp": prob["tp_price_used"],
-        "sl": prob["sl_price_used"],
+        "tp": prob.get("tp_price_used"),
+        "sl": prob.get("sl_price_used"),
         "rr": safe_float(normalized.get("rr_ratio_alert")),
-        "probability_tp_before_sl": round(prob["probability_tp_before_sl"], 4),
-        "probability_model": prob["probability_model"],
-        "barrier_component": round(prob["barrier_component"], 4),
-        "technical_component": round(prob["technical_component"], 4),
-        "ml_component": round(prob["ml_component"], 4) if prob["ml_component"] is not None else None,
-        "score_external": round(ext["score_external"], 2),
-        "quality_score_alert": round(safe_float(normalized.get("quality_score_alert")), 2),
-        "reason": ext["reasons"][:12],
-        "penalties": ext["penalties"][:12],
-    
+        "probability_tp_before_sl": round(safe_float(prob.get("probability_tp_before_sl"), 0.0), 4),
+        "probability_model": prob.get("probability_model"),
+        "barrier_component": round(safe_float(prob.get("barrier_component"), 0.0), 4),
+        "technical_component": round(safe_float(prob.get("technical_component"), 0.0), 4),
+        "ml_component": round(safe_float(prob.get("ml_component")), 4) if prob.get("ml_component") is not None else None,
+        "score_external": round(safe_float(ext.get("score_external"), 0.0), 2),
+        "quality_score_alert": round(safe_float(normalized.get("quality_score_alert"), 0.0), 2),
+        "reason": ext.get("reasons", [])[:12],
+        "penalties": ext.get("penalties", [])[:12],
         "validation_steps": validation_steps,
         "analysis_trace": analysis_trace,
         "analysis_summary": analysis_summary,
-    
         "market_snapshot": {
-            "close_1m": round(f1["close"], 4),
-            "ema20_1m": round(f1["ema20"], 4),
-            "ema50_1m": round(f1["ema50"], 4),
-            "ema200_1m": round(f1["ema200"], 4),
-            "adx_1m": round(f1["adx"], 2),
-            "plus_di_1m": round(f1["plus_di"], 2),
-            "minus_di_1m": round(f1["minus_di"], 2),
-            "atr14_1m": round(f1["atr14"], 4),
-            "rvol20_1m": round(f1["rvol20"], 3),
-            "impulse_atr_1m": round(f1["impulse_atr"], 3),
-            "dist_to_vwap_pct_1m": round(f1["dist_to_vwap_pct"], 4),
-            "spread_bps": round(safe_float(market["order_book"]["spread_bps"]), 4),
-            "book_imbalance": round(safe_float(market["order_book"]["book_imbalance"]), 4),
-            "buy_aggression": round(safe_float(market["flow"]["buy_aggression"]), 4),
-            "sell_aggression": round(safe_float(market["flow"]["sell_aggression"]), 4),
-            "delta_qty": round(safe_float(market["flow"]["delta_qty"]), 6),
-            "bid_wall_detected": market["order_book"]["bid_wall_detected"],
-            "ask_wall_detected": market["order_book"]["ask_wall_detected"],
-            "vacuum_above": market["order_book"]["vacuum_above"],
-            "vacuum_below": market["order_book"]["vacuum_below"],
+            "close_1m": round(safe_float(f1["close"]), 4),
+            "ema20_1m": round(safe_float(f1["ema20"]), 4),
+            "ema50_1m": round(safe_float(f1["ema50"]), 4),
+            "ema200_1m": round(safe_float(f1["ema200"]), 4),
+            "adx_1m": round(safe_float(f1["adx"]), 2),
+            "plus_di_1m": round(safe_float(f1["plus_di"]), 2),
+            "minus_di_1m": round(safe_float(f1["minus_di"]), 2),
+            "atr14_1m": round(safe_float(f1["atr14"]), 4),
+            "rvol20_1m": round(safe_float(f1["rvol20"], 1.0), 3),
+            "impulse_atr_1m": round(safe_float(f1["impulse_atr"]), 3),
+            "dist_to_vwap_pct_1m": round(safe_float(f1["dist_to_vwap_pct"]), 4),
+            "spread_bps": round(safe_float(market["order_book"].get("spread_bps")), 4),
+            "book_imbalance": round(safe_float(market["order_book"].get("book_imbalance")), 4),
+            "buy_aggression": round(safe_float(market["flow"].get("buy_aggression")), 4),
+            "sell_aggression": round(safe_float(market["flow"].get("sell_aggression")), 4),
+            "delta_qty": round(safe_float(market["flow"].get("delta_qty")), 6),
+            "bid_wall_detected": market["order_book"].get("bid_wall_detected"),
+            "ask_wall_detected": market["order_book"].get("ask_wall_detected"),
+            "vacuum_above": market["order_book"].get("vacuum_above"),
+            "vacuum_below": market["order_book"].get("vacuum_below"),
         },
-        "structure_snapshot": structure,
+        "structure_snapshot": {
+            "last_swing_high": structure.get("last_swing_high"),
+            "last_swing_low": structure.get("last_swing_low"),
+            "distance_to_swing_high_pct": structure.get("distance_to_swing_high_pct"),
+            "distance_to_swing_low_pct": structure.get("distance_to_swing_low_pct"),
+            "range_mode": structure.get("range_mode"),
+            "compression_box": structure.get("compression_box"),
+        },
         "alert_reused": {
             "regime": normalized.get("regime"),
             "phase": normalized.get("phase"),
@@ -1541,7 +1608,7 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
         }
     }
 
-    return {
+    result = {
         "ok": True,
         "validated_at": utc_now_iso(),
         "message": "Validation completed",
@@ -1560,6 +1627,8 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
             "quality_class_alert": normalized["quality_class_alert"],
         }
     }
+
+    return sanitize_for_json(result)
 def build_history_item(payload: dict, validation_result: dict | None = None) -> dict:
     signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
     context = payload.get("context", {}) if isinstance(payload.get("context"), dict) else {}
@@ -1610,7 +1679,6 @@ async def healthcheck():
         "model_loaded": SKLEARN_MODEL is not None,
         "allowed_origins": allowed_origins,
     }
-
 @app.get("/api/validation/latest")
 async def get_latest_validation():
     return LAST_VALIDATION
@@ -1646,6 +1714,7 @@ async def validate_payload(
     validate_secret(x_webhook_secret)
     raw_body = await request.body()
     payload = parse_payload(raw_body)
+
     if not payload:
         if LAST_ALERT.get("payload"):
             payload = LAST_ALERT["payload"]
@@ -1653,7 +1722,11 @@ async def validate_payload(
             raise HTTPException(status_code=400, detail="Empty payload and no LAST_ALERT stored")
 
     result = await run_validation(payload)
-    return JSONResponse(status_code=200, content=result)
+    safe_result = sanitize_for_json(result)
+
+    log_event("validate_endpoint_response", safe_result)
+
+    return JSONResponse(status_code=200, content=safe_result)
 
 @app.post("/api/webhook")
 async def tradingview_webhook(
@@ -1667,10 +1740,12 @@ async def tradingview_webhook(
         validate_secret(x_webhook_secret)
 
         raw_body = await request.body()
+
         t0_parse = time.perf_counter()
         payload = parse_payload(raw_body)
         parse_ms = round((time.perf_counter() - t0_parse) * 1000, 2)
         log_event("metric_parse_time", {"ms": parse_ms})
+
         log_event("webhook_received", {
             "headers": {
                 "content_type": request.headers.get("content-type"),
@@ -1688,7 +1763,7 @@ async def tradingview_webhook(
             },
         )
 
-        print(json.dumps(log_data, ensure_ascii=False))
+        log_event("webhook_build_log", log_data)
 
         validation_result = None
 
@@ -1697,12 +1772,10 @@ async def tradingview_webhook(
             validation_result = await run_validation(payload)
             validation_ms = round((time.perf_counter() - t0_validation) * 1000, 2)
 
-            log_event("metric_validation_time", {
-                "ms": validation_ms
-            })
-            LAST_VALIDATION = validation_result
+            log_event("metric_validation_time", {"ms": validation_ms})
 
-            log_event("validation_result", validation_result)
+            LAST_VALIDATION = sanitize_for_json(validation_result)
+            log_event("validation_result", LAST_VALIDATION)
 
         except Exception as e:
             validation_result = {
@@ -1712,12 +1785,13 @@ async def tradingview_webhook(
                 "error": str(e)
             }
 
-            LAST_VALIDATION = validation_result
+            LAST_VALIDATION = sanitize_for_json(validation_result)
 
             log_event("validation_error", {
                 "error": str(e),
+                "traceback": traceback.format_exc(),
                 "payload": payload,
-                "validation_result": validation_result
+                "validation_result": LAST_VALIDATION
             })
 
         signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
@@ -1725,7 +1799,7 @@ async def tradingview_webhook(
         quality = payload.get("quality", {}) if isinstance(payload.get("quality"), dict) else {}
         htf_context = payload.get("htf_context", {}) if isinstance(payload.get("htf_context"), dict) else {}
 
-        LAST_ALERT = {
+        LAST_ALERT = sanitize_for_json({
             "ok": True,
             "received_at": utc_now_iso(),
             "route": "/api/webhook",
@@ -1743,17 +1817,13 @@ async def tradingview_webhook(
             "quality_score": quality.get("quality_score") or payload.get("quality_score") or payload.get("score"),
             "price": signal.get("price") or payload.get("price"),
             "side": signal.get("side") or payload.get("side"),
-
-            # payload completo
             "payload": payload,
-
-            # validación completa
-            "validation": validation_result,
-        }
+            "validation": LAST_VALIDATION,
+        })
 
         log_event("last_alert_updated", LAST_ALERT)
 
-        history_item = build_history_item(payload, validation_result)
+        history_item = sanitize_for_json(build_history_item(payload, LAST_VALIDATION))
         ALERT_HISTORY.append(history_item)
 
         log_event("history_item_appended", {
@@ -1761,21 +1831,46 @@ async def tradingview_webhook(
             "history_item": history_item
         })
 
-        response_content = {
+        total_ms = round((time.perf_counter() - t0_total) * 1000, 2)
+        log_event("metric_total_processing_time", {"ms": total_ms})
+
+        response_content = sanitize_for_json({
             "ok": True,
             "message": "Alert received and processed",
             "data": LAST_ALERT,
-        }
+        })
 
         log_event("webhook_response", response_content)
-        total_ms = round((time.perf_counter() - t0_total) * 1000, 2)
 
-        log_event("metric_total_processing_time", {
-            "ms": total_ms
-        })
         return JSONResponse(
             status_code=200,
             content=response_content,
+        )
+
+    except HTTPException as e:
+        log_event("webhook_http_exception", {
+            "status_code": e.status_code,
+            "detail": e.detail
+        })
+        raise
+
+    except Exception as e:
+        error_response = sanitize_for_json({
+            "ok": False,
+            "message": "Unhandled webhook processing error",
+            "error": str(e),
+            "received_at": utc_now_iso()
+        })
+
+        log_event("webhook_unhandled_exception", {
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+            "response": error_response
+        })
+
+        return JSONResponse(
+            status_code=500,
+            content=error_response
         )
 
     except HTTPException as e:
