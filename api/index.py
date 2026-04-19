@@ -1471,15 +1471,15 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
         approve=approve
     )
 
-log_event("validation_steps", validation_steps)
-log_event("analysis_trace", {
-    "trace": analysis_trace,
-    "summary": analysis_summary
-})
+    log_event("validation_steps", validation_steps)
+    log_event("analysis_trace", {
+        "trace": analysis_trace,
+        "summary": analysis_summary
+    })
     confidence = round(prob["probability_tp_before_sl"] * 100.0, 2)
     entry_price = normalized["entry_price"] if normalized["entry_price"] > 0 else f1["close"]
 
-     validation = {
+    validation = {
         "approve": approve,
         "confidence": confidence,
         "side": normalized["side"],
@@ -1606,7 +1606,7 @@ async def healthcheck():
             "/api/validate",
             "/api/health/binance"
         ],
-        "binance_base_url": BINANCE_BASE_URL,
+        "binance_base_urls": BINANCE_BASE_URLS,
         "model_loaded": SKLEARN_MODEL is not None,
         "allowed_origins": allowed_origins,
     }
@@ -1778,7 +1778,11 @@ async def tradingview_webhook(
         }
 
         log_event("webhook_response", response_content)
+        total_ms = round((time.perf_counter() - t0_total) * 1000, 2)
 
+        log_event("metric_total_processing_time", {
+            "ms": total_ms
+        })
         return JSONResponse(
             status_code=200,
             content=response_content,
@@ -1803,11 +1807,7 @@ async def tradingview_webhook(
             "error": str(e),
             "response": error_response
         })
-        total_ms = round((time.perf_counter() - t0_total) * 1000, 2)
 
-        log_event("metric_total_processing_time", {
-            "ms": total_ms
-        })
         return JSONResponse(
             status_code=500,
             content=error_response
