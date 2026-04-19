@@ -1136,6 +1136,107 @@ def extract_latest_features(df: pd.DataFrame) -> Dict[str, float]:
         "ret_mean_20": safe_float(rets20.mean(), 0.0),
         "ret_std_20": max(safe_float(rets20.std(), 0.001), 1e-6),
     }
+# VALIDATION STEPS
+#validación de evento
+#validación de contexto
+#validación de tendencia
+#validación de microestructura
+#validación de flujo
+#validación de espacio TP/SL
+#validación de probabilidad TP antes que SL
+
+# VALIKDATION HELPERS
+def build_validation_step(ok: bool, reason: str, details: dict | None = None) -> dict:
+    return {
+        "ok": ok,
+        "status": "OK" if ok else "KO",
+        "reason": reason,
+        "details": details or {}
+    }
+def build_analysis_outputs(
+    normalized_alert: dict,
+    validation_steps: dict,
+    probability_tp_before_sl: float | None,
+    score_external: float | None,
+    approve: bool
+) -> tuple[list[str], dict]:
+    trace = []
+
+    event = normalized_alert.get("event", "UNKNOWN")
+    side = str(normalized_alert.get("side", "")).upper()
+
+    trace.append(f"Evento recibido: {event} ({side}).")
+
+    step_context = validation_steps.get("context_validation", {})
+    step_micro = validation_steps.get("microstructure_validation", {})
+    step_flow = validation_steps.get("flow_validation", {})
+    step_tp = validation_steps.get("tp_probability_validation", {})
+    step_room = validation_steps.get("tp_room_validation", {})
+    step_extension = validation_steps.get("extension_validation", {})
+
+    if step_context.get("ok"):
+        trace.append("El contexto técnico general está alineado con la dirección propuesta.")
+    else:
+        trace.append("El contexto técnico general no acompaña suficientemente la dirección propuesta.")
+
+    if step_micro.get("ok"):
+        trace.append("La microestructura de ejecución es favorable.")
+    else:
+        trace.append("La microestructura no ofrece suficiente apoyo operativo.")
+
+    if step_flow.get("ok"):
+        trace.append("El flujo reciente acompaña el movimiento esperado.")
+    else:
+        trace.append("El flujo reciente no confirma con claridad la continuación.")
+
+    if step_room.get("ok"):
+        trace.append("Existe espacio razonable para que el precio alcance el TP.")
+    else:
+        trace.append("El espacio hacia el TP parece limitado por estructura cercana.")
+
+    if step_extension.get("ok"):
+        trace.append("No se detecta un nivel de extensión suficiente para bloquear la entrada.")
+    else:
+        trace.append("La señal aparece demasiado extendida o tardía.")
+
+    if probability_tp_before_sl is not None:
+        trace.append(
+            f"La probabilidad estimada de alcanzar TP antes que SL es {round(probability_tp_before_sl * 100, 2)}%."
+        )
+
+    if approve:
+        final_conclusion = "La entrada queda aprobada por la Validation Layer."
+    else:
+        final_conclusion = "La entrada queda rechazada o no validada por la Validation Layer."
+
+    trace.append(final_conclusion)
+
+    summary = {
+        "market_context": (
+            "Contexto favorable."
+            if step_context.get("ok")
+            else "Contexto no suficientemente favorable."
+        ),
+        "execution_quality": (
+            "Condiciones de ejecución aceptables."
+            if step_micro.get("ok")
+            else "Condiciones de ejecución débiles o mejorables."
+        ),
+        "risk_reading": (
+            "Riesgo controlado."
+            if step_tp.get("ok")
+            else "Riesgo operativo elevado frente al objetivo."
+        ),
+        "final_conclusion": final_conclusion,
+        "score_comment": (
+            f"Score externo calculado: {round(score_external, 2)}."
+            if score_external is not None
+            else "Score externo no disponible."
+        )
+    }
+
+    return trace, summary
+
 
 async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
     signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
@@ -1188,17 +1289,197 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
         backend_features=ext["backend_feature_pack"],
         score_external=ext["score_external"]
     )
-
+    validation_steps = {}
+    
+    # ------------------------------------------------------------
+    # EVENT GATE
+    # ------------------------------------------------------------
+    event_upper = str(normalized.get("event", "")).upper()
+    entry_events = {"LONG_ENTRY", "SHORT_ENTRY", "REAL_LONG_ENTRY", "REAL_SHORT_ENTRY"}
+    
+    validation_steps["event_gate"] = build_validation_step(
+        ok=event_upper in entry_events,
+        reason=(
+            "entry event eligible for full validation"
+            if event_upper in entry_events
+            else f"event {event_upper} is not an entry event"
+        ),
+        details={
+            "event": event_upper,
+            "entry_events_allowed": sorted(list(entry_events))
+        }
+    )
+    
+    # ------------------------------------------------------------
+    # CONTEXT VALIDATION
+    # ------------------------------------------------------------
+    context_ok = "htf_aligned" in ext["reasons"] or "ema_trend_aligned" in ext["reasons"]
+    validation_steps["context_validation"] = build_validation_step(
+        ok=context_ok,
+        reason=(
+            "HTF or trend context aligned"
+            if context_ok
+            else "HTF and trend context not sufficiently aligned"
+        ),
+        details={
+            "regime": normalized.get("regime"),
+            "phase": normalized.get("phase"),
+            "dir_state": normalized.get("dir_state"),
+            "htf_phase": normalized.get("htf_phase"),
+            "htf_phase_strength": normalized.get("htf_phase_strength"),
+            "adx_1m": f1["adx"],
+            "close_1m": f1["close"],
+            "vwap_1m": f1["vwap_session"]
+        }
+    )
+    
+    # ------------------------------------------------------------
+    # MICROSTRUCTURE VALIDATION
+    # ------------------------------------------------------------
+    micro_ok = (
+        safe_float(market["order_book"].get("spread_bps"), 999.0) <= 2.5 and
+        (
+            (normalized["side"] == "long" and safe_float(market["order_book"].get("book_imbalance"), 0.0) > 0.0) or
+            (normalized["side"] == "short" and safe_float(market["order_book"].get("book_imbalance"), 0.0) < 0.0)
+        )
+    )
+    validation_steps["microstructure_validation"] = build_validation_step(
+        ok=micro_ok,
+        reason=(
+            "spread acceptable and order book aligned"
+            if micro_ok
+            else "spread or order book alignment not supportive"
+        ),
+        details={
+            "spread_bps": market["order_book"].get("spread_bps"),
+            "book_imbalance": market["order_book"].get("book_imbalance"),
+            "bid_wall_detected": market["order_book"].get("bid_wall_detected"),
+            "ask_wall_detected": market["order_book"].get("ask_wall_detected"),
+            "vacuum_above": market["order_book"].get("vacuum_above"),
+            "vacuum_below": market["order_book"].get("vacuum_below"),
+        }
+    )
+    
+    # ------------------------------------------------------------
+    # FLOW VALIDATION
+    # ------------------------------------------------------------
+    flow_ok = (
+        (normalized["side"] == "long" and safe_float(market["flow"].get("delta_qty"), 0.0) > 0.0) or
+        (normalized["side"] == "short" and safe_float(market["flow"].get("delta_qty"), 0.0) < 0.0)
+    )
+    validation_steps["flow_validation"] = build_validation_step(
+        ok=flow_ok,
+        reason=(
+            "trade flow aligned with expected side"
+            if flow_ok
+            else "trade flow not aligned with expected side"
+        ),
+        details={
+            "delta_qty": market["flow"].get("delta_qty"),
+            "buy_aggression": market["flow"].get("buy_aggression"),
+            "sell_aggression": market["flow"].get("sell_aggression"),
+            "trade_count": market["flow"].get("trade_count")
+        }
+    )
+    
+    # ------------------------------------------------------------
+    # TP ROOM VALIDATION
+    # ------------------------------------------------------------
+    tp_room_ok = ext["backend_feature_pack"].get("tp_room_ok", 0.0) > 0
+    validation_steps["tp_room_validation"] = build_validation_step(
+        ok=tp_room_ok,
+        reason=(
+            "there is enough structural room to target TP"
+            if tp_room_ok
+            else "structure suggests limited room to TP"
+        ),
+        details={
+            "last_swing_high": structure.get("last_swing_high"),
+            "last_swing_low": structure.get("last_swing_low"),
+            "distance_to_swing_high_pct": structure.get("distance_to_swing_high_pct"),
+            "distance_to_swing_low_pct": structure.get("distance_to_swing_low_pct"),
+            "distance_to_tp_pct_alert": normalized.get("distance_to_tp_pct_alert")
+        }
+    )
+    
+    # ------------------------------------------------------------
+    # EXTENSION VALIDATION
+    # ------------------------------------------------------------
+    extension_ok = not normalized.get("too_extended_block_alert", False) and not normalized.get("late_trend_alert", False)
+    validation_steps["extension_validation"] = build_validation_step(
+        ok=extension_ok,
+        reason=(
+            "entry is not excessively extended or late"
+            if extension_ok
+            else "entry appears extended or late in trend"
+        ),
+        details={
+            "too_extended_warn_alert": normalized.get("too_extended_warn_alert"),
+            "too_extended_block_alert": normalized.get("too_extended_block_alert"),
+            "late_trend_alert": normalized.get("late_trend_alert")
+        }
+    )
+    
+    # ------------------------------------------------------------
+    # PROBABILITY VALIDATION
+    # ------------------------------------------------------------
+    tp_prob_ok = prob["probability_tp_before_sl"] >= VALIDATION_THRESHOLD
+    validation_steps["tp_probability_validation"] = build_validation_step(
+        ok=tp_prob_ok,
+        reason=(
+            "probability to hit TP before SL is above threshold"
+            if tp_prob_ok
+            else "probability to hit TP before SL is below threshold"
+        ),
+        details={
+            "probability_tp_before_sl": prob["probability_tp_before_sl"],
+            "threshold": VALIDATION_THRESHOLD,
+            "barrier_component": prob["barrier_component"],
+            "technical_component": prob["technical_component"],
+            "ml_component": prob["ml_component"]
+        }
+    )
+    
+    # ------------------------------------------------------------
+    # SCORE VALIDATION
+    # ------------------------------------------------------------
+    score_ok = ext["score_external"] >= MIN_SCORE_THRESHOLD
+    validation_steps["score_validation"] = build_validation_step(
+        ok=score_ok,
+        reason=(
+            "external score above minimum threshold"
+            if score_ok
+            else "external score below minimum threshold"
+        ),
+        details={
+            "score_external": ext["score_external"],
+            "threshold": MIN_SCORE_THRESHOLD,
+            "reasons": ext["reasons"],
+            "penalties": ext["penalties"]
+        }
+    )
     approve = bool(
         prob["probability_tp_before_sl"] >= VALIDATION_THRESHOLD and
         ext["score_external"] >= MIN_SCORE_THRESHOLD and
         not normalized.get("too_extended_block_alert", False)
     )
+    analysis_trace, analysis_summary = build_analysis_outputs(
+        normalized_alert=normalized,
+        validation_steps=validation_steps,
+        probability_tp_before_sl=prob["probability_tp_before_sl"],
+        score_external=ext["score_external"],
+        approve=approve
+    )
 
+log_event("validation_steps", validation_steps)
+log_event("analysis_trace", {
+    "trace": analysis_trace,
+    "summary": analysis_summary
+})
     confidence = round(prob["probability_tp_before_sl"] * 100.0, 2)
     entry_price = normalized["entry_price"] if normalized["entry_price"] > 0 else f1["close"]
 
-    validation = {
+     validation = {
         "approve": approve,
         "confidence": confidence,
         "side": normalized["side"],
@@ -1217,6 +1498,11 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
         "quality_score_alert": round(safe_float(normalized.get("quality_score_alert")), 2),
         "reason": ext["reasons"][:12],
         "penalties": ext["penalties"][:12],
+    
+        "validation_steps": validation_steps,
+        "analysis_trace": analysis_trace,
+        "analysis_summary": analysis_summary,
+    
         "market_snapshot": {
             "close_1m": round(f1["close"], 4),
             "ema20_1m": round(f1["ema20"], 4),
