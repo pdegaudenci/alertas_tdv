@@ -76,6 +76,7 @@ LAST_VALIDATION = {
 }
 
 ALERT_HISTORY = deque(maxlen=200)
+ASSEMBLED_EVENTS: Dict[str, Dict[str, Any]] = {}
 # ============================================================
 # CONFIG
 # ============================================================
@@ -107,6 +108,7 @@ except Exception:
 # ============================================================
 # UTILS
 # ============================================================
+ASSEMBLED_EVENTS: Dict[str, Dict[str, Any]] = {}
 def is_bad_number(value: Any) -> bool:
     try:
         if isinstance(value, (float, np.floating)):
@@ -208,24 +210,27 @@ def nested_get(d: Dict[str, Any], *keys: str, default: Any = None) -> Any:
     return cur if cur is not None else default
 
 def build_log(route: str, payload: dict, headers: dict | None = None) -> dict:
-    signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
-    context = payload.get("context", {}) if isinstance(payload.get("context"), dict) else {}
-    quality = payload.get("quality", {}) if isinstance(payload.get("quality"), dict) else {}
+    canonical = ensure_canonical_schema(payload)
+
+    signal = canonical.get("signal", {}) if isinstance(canonical.get("signal"), dict) else {}
+    context = canonical.get("context", {}) if isinstance(canonical.get("context"), dict) else {}
+    quality = canonical.get("quality", {}) if isinstance(canonical.get("quality"), dict) else {}
 
     return {
         "received_at": utc_now_iso(),
         "route": route,
-        "schema_version": payload.get("schema_version"),
-        "message_type": payload.get("message_type"),
-        "symbol": signal.get("symbol") or payload.get("symbol") or payload.get("ticker"),
-        "timeframe": signal.get("tf") or payload.get("timeframe") or payload.get("tf"),
-        "event": signal.get("event") or payload.get("event"),
-        "side": signal.get("side") or payload.get("side"),
-        "setup": signal.get("setup") or payload.get("setup"),
-        "price": signal.get("price") or payload.get("price"),
-        "phase": context.get("phase") or payload.get("phase"),
+        "schema_version": canonical.get("schema_version"),
+        "message_type": canonical.get("message_type"),
+        "event_uid": canonical.get("event_uid"),
+        "symbol": signal.get("symbol") or canonical.get("symbol") or canonical.get("ticker"),
+        "timeframe": signal.get("tf") or canonical.get("timeframe") or canonical.get("tf"),
+        "event": signal.get("event") or canonical.get("event"),
+        "side": signal.get("side") or canonical.get("side"),
+        "setup": signal.get("setup") or canonical.get("setup"),
+        "price": signal.get("price") or canonical.get("price"),
+        "phase": context.get("phase") or canonical.get("phase"),
         "regime": context.get("regime"),
-        "quality_score": quality.get("quality_score") or payload.get("quality_score") or payload.get("score"),
+        "quality_score": quality.get("quality_score") or canonical.get("quality_score") or canonical.get("score"),
         "headers": headers or {},
     }
 
@@ -233,26 +238,34 @@ def build_log(route: str, payload: dict, headers: dict | None = None) -> dict:
 # ALERT NORMALIZATION
 # ============================================================
 def normalize_alert(payload: Dict[str, Any]) -> Dict[str, Any]:
-    signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
-    context = payload.get("context", {}) if isinstance(payload.get("context"), dict) else {}
-    movement = payload.get("movement", {}) if isinstance(payload.get("movement"), dict) else {}
-    liquidity = payload.get("liquidity", {}) if isinstance(payload.get("liquidity"), dict) else {}
-    structure = payload.get("structure", {}) if isinstance(payload.get("structure"), dict) else {}
-    trigger = payload.get("trigger", {}) if isinstance(payload.get("trigger"), dict) else {}
-    quality = payload.get("quality", {}) if isinstance(payload.get("quality"), dict) else {}
-    trade_plan = payload.get("trade_plan", {}) if isinstance(payload.get("trade_plan"), dict) else {}
-    setup_timing = payload.get("setup_timing", {}) if isinstance(payload.get("setup_timing"), dict) else {}
-    setup_validation = payload.get("setup_validation", {}) if isinstance(payload.get("setup_validation"), dict) else {}
-    setup_context = payload.get("setup_context", {}) if isinstance(payload.get("setup_context"), dict) else {}
-    sequence = payload.get("sequence", {}) if isinstance(payload.get("sequence"), dict) else {}
-    htf_context = payload.get("htf_context", {}) if isinstance(payload.get("htf_context"), dict) else {}
+    canonical = ensure_canonical_schema(payload)
 
-    side = str(signal.get("side") or payload.get("side") or "").lower().strip()
-    symbol = str(signal.get("symbol") or payload.get("symbol") or payload.get("ticker") or "BTCUSDC").upper().strip()
-    event = str(signal.get("event") or payload.get("event") or "").upper().strip()
-    tf = str(signal.get("tf") or payload.get("tf") or payload.get("timeframe") or "1m").strip()
+    signal = canonical.get("signal", {}) if isinstance(canonical.get("signal"), dict) else {}
+    context = canonical.get("context", {}) if isinstance(canonical.get("context"), dict) else {}
+    movement = canonical.get("movement", {}) if isinstance(canonical.get("movement"), dict) else {}
+    liquidity = canonical.get("liquidity", {}) if isinstance(canonical.get("liquidity"), dict) else {}
+    structure = canonical.get("structure", {}) if isinstance(canonical.get("structure"), dict) else {}
+    trigger = canonical.get("trigger", {}) if isinstance(canonical.get("trigger"), dict) else {}
+    quality = canonical.get("quality", {}) if isinstance(canonical.get("quality"), dict) else {}
+    trade_plan = canonical.get("trade_plan", {}) if isinstance(canonical.get("trade_plan"), dict) else {}
+    setup_timing = canonical.get("setup_timing", {}) if isinstance(canonical.get("setup_timing"), dict) else {}
+    setup_validation = canonical.get("setup_validation", {}) if isinstance(canonical.get("setup_validation"), dict) else {}
+    setup_context = canonical.get("setup_context", {}) if isinstance(canonical.get("setup_context"), dict) else {}
+    sequence = canonical.get("sequence", {}) if isinstance(canonical.get("sequence"), dict) else {}
+    htf_context = canonical.get("htf_context", {}) if isinstance(canonical.get("htf_context"), dict) else {}
+    execution = canonical.get("execution", {}) if isinstance(canonical.get("execution"), dict) else {}
 
-    entry_price = safe_float(signal.get("price") or signal.get("close") or payload.get("price"))
+    side = str(signal.get("side") or canonical.get("side") or "").lower().strip()
+    symbol = str(signal.get("symbol") or canonical.get("symbol") or canonical.get("ticker") or "BTCUSDC").upper().strip()
+    event = str(signal.get("event") or canonical.get("event") or "").upper().strip()
+    tf = str(signal.get("tf") or canonical.get("tf") or canonical.get("timeframe") or "1m").strip()
+
+    entry_price = safe_float(
+        signal.get("entry_price") or
+        signal.get("price") or
+        signal.get("close") or
+        canonical.get("price")
+    )
     tp_price = safe_float(trade_plan.get("tp_price"))
     sl_price = safe_float(trade_plan.get("sl_price"))
 
@@ -262,10 +275,11 @@ def normalize_alert(payload: Dict[str, Any]) -> Dict[str, Any]:
         elif "SHORT" in event:
             side = "short"
 
-    normalized = {
-        "schema_version": payload.get("schema_version", "unknown"),
-        "message_type": payload.get("message_type", "unknown"),
-        "source": payload.get("source", {}),
+    return {
+        "schema_version": canonical.get("schema_version", "unknown"),
+        "message_type": canonical.get("message_type", "unknown"),
+        "event_uid": canonical.get("event_uid"),
+        "source": canonical.get("source", {}),
         "signal": signal,
         "context": context,
         "movement": movement,
@@ -279,6 +293,7 @@ def normalize_alert(payload: Dict[str, Any]) -> Dict[str, Any]:
         "setup_context": setup_context,
         "sequence": sequence,
         "htf_context": htf_context,
+        "execution": execution,
 
         "symbol": symbol,
         "side": side,
@@ -288,8 +303,7 @@ def normalize_alert(payload: Dict[str, Any]) -> Dict[str, Any]:
         "tp_price": tp_price,
         "sl_price": sl_price,
 
-        # Reusable Pine outputs
-        "quality_score_alert": safe_float(quality.get("quality_score") or payload.get("quality_score")),
+        "quality_score_alert": safe_float(quality.get("quality_score") or canonical.get("quality_score")),
         "quality_class_alert": quality.get("quality_class"),
         "quality_approved_alert": bool(quality.get("quality_approved", False)),
         "regime": context.get("regime"),
@@ -339,7 +353,6 @@ def normalize_alert(payload: Dict[str, Any]) -> Dict[str, Any]:
         "tp_perc_alert": safe_float(trade_plan.get("tp_perc")),
         "sl_perc_alert": safe_float(trade_plan.get("sl_perc")),
     }
-    return normalized
 
 # ============================================================
 # BINANCE CLIENT
@@ -1630,26 +1643,29 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     return sanitize_for_json(result)
 def build_history_item(payload: dict, validation_result: dict | None = None) -> dict:
-    signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
-    context = payload.get("context", {}) if isinstance(payload.get("context"), dict) else {}
-    quality = payload.get("quality", {}) if isinstance(payload.get("quality"), dict) else {}
-    htf_context = payload.get("htf_context", {}) if isinstance(payload.get("htf_context"), dict) else {}
+    canonical = ensure_canonical_schema(payload)
+
+    signal = canonical.get("signal", {}) if isinstance(canonical.get("signal"), dict) else {}
+    context = canonical.get("context", {}) if isinstance(canonical.get("context"), dict) else {}
+    quality = canonical.get("quality", {}) if isinstance(canonical.get("quality"), dict) else {}
+    htf_context = canonical.get("htf_context", {}) if isinstance(canonical.get("htf_context"), dict) else {}
 
     validation = validation_result.get("validation", {}) if isinstance(validation_result, dict) else {}
 
-    return {
+    return sanitize_for_json({
         "received_at": utc_now_iso(),
-        "schema_version": payload.get("schema_version"),
-        "message_type": payload.get("message_type"),
-        "symbol": signal.get("symbol") or payload.get("symbol") or payload.get("ticker"),
-        "tf": signal.get("tf") or payload.get("tf") or payload.get("timeframe"),
-        "event": signal.get("event") or payload.get("event"),
-        "side": signal.get("side") or payload.get("side"),
-        "setup": signal.get("setup") or payload.get("setup"),
-        "price": signal.get("price") or payload.get("price"),
+        "schema_version": canonical.get("schema_version"),
+        "message_type": canonical.get("message_type"),
+        "event_uid": canonical.get("event_uid"),
+        "symbol": signal.get("symbol"),
+        "tf": signal.get("tf"),
+        "event": signal.get("event"),
+        "side": signal.get("side"),
+        "setup": signal.get("setup"),
+        "price": signal.get("price"),
         "phase": context.get("phase"),
         "regime": context.get("regime"),
-        "quality_score": quality.get("quality_score") or payload.get("quality_score") or payload.get("score"),
+        "quality_score": quality.get("quality_score"),
         "htf_phase": htf_context.get("htf_phase"),
         "htf_phase_strength": htf_context.get("htf_phase_strength"),
         "approve": validation.get("approve"),
@@ -1658,7 +1674,7 @@ def build_history_item(payload: dict, validation_result: dict | None = None) -> 
         "score_external": validation.get("score_external"),
         "reason": validation.get("reason", []),
         "penalties": validation.get("penalties", []),
-    }
+    })
 # ============================================================
 # ROUTES
 # ============================================================
@@ -1742,7 +1758,8 @@ async def tradingview_webhook(
         raw_body = await request.body()
 
         t0_parse = time.perf_counter()
-        payload = parse_payload(raw_body)
+        payload_raw = parse_payload(raw_body)
+        payload = assemble_event_payload(payload_raw)
         parse_ms = round((time.perf_counter() - t0_parse) * 1000, 2)
         log_event("metric_parse_time", {"ms": parse_ms})
 
@@ -1751,7 +1768,8 @@ async def tradingview_webhook(
                 "content_type": request.headers.get("content-type"),
                 "user_agent": request.headers.get("user-agent")
             },
-            "payload": payload
+            "payload_raw": payload_raw,
+            "payload_assembled": payload
         })
 
         log_data = build_log(
@@ -1769,7 +1787,23 @@ async def tradingview_webhook(
 
         try:
             t0_validation = time.perf_counter()
-            validation_result = await run_validation(payload)
+            if should_validate_payload(payload):
+                validation_result = await run_validation(payload)
+            else:
+                validation_result = {
+                    "ok": True,
+                    "validated_at": utc_now_iso(),
+                    "message": "Validation deferred or skipped for this partial/non-entry payload",
+                    "validation": {
+                        "approve": False,
+                        "confidence": 0,
+                        "probability_tp_before_sl": None,
+                        "score_external": None,
+                        "reason": [f"validation_skipped_for_message_type:{payload.get('message_type')}"],
+                        "penalties": [],
+                        "event_type": nested_get(payload, "signal", "event")
+                    }
+                }
             validation_ms = round((time.perf_counter() - t0_validation) * 1000, 2)
 
             log_event("metric_validation_time", {"ms": validation_ms})
