@@ -82,7 +82,7 @@ ALERT_HISTORY = deque(maxlen=200)
 BINANCE_BASE_URLS = [
     "https://data-api.binance.vision",
     "https://api.binance.com"
-]º
+]
 WEBHOOK_SECRET_ENV = os.getenv("WEBHOOK_SECRET", "")
 VALIDATION_THRESHOLD = float(os.getenv("VALIDATION_THRESHOLD", "0.62"))  # probability threshold
 MIN_SCORE_THRESHOLD = float(os.getenv("MIN_SCORE_THRESHOLD", "55"))      # score threshold
