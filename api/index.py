@@ -2321,6 +2321,82 @@ async def tradingview_webhook(
             status_code=500,
             content=error_response
         )
+
+@app.get("/api/alerts/supabase")
+async def get_alerts_supabase(limit: int = 50):
+    if not SUPABASE_ENABLED or supabase is None:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "message": "Supabase not configured"
+            }
+        )
+
+    try:
+        resp = (
+            supabase
+            .table("alert_events")
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+
+        rows = resp.data or []
+
+        items = []
+        for row in rows:
+            normalized = row.get("normalized_payload") or {}
+            technical = row.get("technical_state") or {}
+            micro = row.get("microstructure_state") or {}
+
+            items.append({
+                "id": row.get("id"),
+                "created_at": row.get("created_at"),
+                "event_id": row.get("event_id"),
+                "setup_id": row.get("setup_id"),
+                "symbol": row.get("symbol"),
+                "tf": row.get("timeframe"),
+                "event": row.get("alert_type"),
+                "side": row.get("side"),
+                "status": row.get("status"),
+                "strategy_name": row.get("strategy_name"),
+                "phase": technical.get("phase"),
+                "regime": technical.get("regime"),
+                "dir_state": technical.get("dir_state"),
+                "mov_state": technical.get("mov_state"),
+                "liq_state": technical.get("liq_state"),
+                "htf_phase": technical.get("htf_phase"),
+                "trigger_alignment": technical.get("trigger_alignment"),
+                "spread_bps": micro.get("spread_bps"),
+                "book_imbalance": micro.get("book_imbalance"),
+                "raw_payload": row.get("raw_payload"),
+                "normalized_payload": normalized,
+                "technical_state": technical,
+                "microstructure_state": micro
+            })
+
+        return {
+            "ok": True,
+            "count": len(items),
+            "items": sanitize_for_json(items)
+        }
+
+    except Exception as e:
+        log_event("supabase_history_read_error", {
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        })
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "message": "Could not read alerts from Supabase",
+                "error": str(e)
+            }
+        )
+        
 @app.get("/api/alerts")
 async def get_alerts(limit: int = 50):
     items = list(ALERT_HISTORY)[-limit:]
