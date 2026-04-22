@@ -15,6 +15,8 @@ import pandas as pd
 from scipy.special import expit
 import logging
 import traceback
+
+from supabase import create_client, Client
 # ============================================================
 # APP
 # ============================================================
@@ -104,7 +106,34 @@ try:
 except Exception:
     SKLEARN_MODEL = None
     SKLEARN_FEATURE_ORDER = []
+# ============================================================
+# SUPABASE CONFIG
+# ============================================================
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 
+SUPABASE_ENABLED = bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+supabase: Optional[Client] = None
+
+if SUPABASE_ENABLED:
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        log_event("supabase_init_ok", {
+            "enabled": True,
+            "url_present": bool(SUPABASE_URL)
+        })
+    except Exception as e:
+        supabase = None
+        SUPABASE_ENABLED = False
+        log_event("supabase_init_error", {
+            "enabled": False,
+            "error": str(e)
+        })
+else:
+    log_event("supabase_init_skipped", {
+        "enabled": False,
+        "reason": "missing_env_vars"
+    })
 # ============================================================
 # UTILS
 # ============================================================
@@ -1195,6 +1224,317 @@ def extract_latest_features(df: pd.DataFrame) -> Dict[str, float]:
         "ret_mean_20": safe_float(rets20.mean(), 0.0),
         "ret_std_20": max(safe_float(rets20.std(), 0.001), 1e-6),
     }
+# ============================================================
+# SUPABASE HELPERS
+# ============================================================
+def extract_setup_id(payload: Dict[str, Any]) -> str:
+    signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
+
+    candidates = [
+        payload.get("setup_id"),
+        payload.get("event_uid"),
+        signal.get("setup"),
+        signal.get("setup_id"),
+        signal.get("event_uid"),
+    ]
+
+    for c in candidates:
+        if c is not None and str(c).strip():
+            return str(c).strip()
+
+    symbol = str(signal.get("symbol") or payload.get("symbol") or payload.get("ticker") or "UNKNOWN").upper().strip()
+    tf = str(signal.get("tf") or payload.get("tf") or payload.get("timeframe") or "UNKNOWN").strip()
+    side = str(signal.get("side") or payload.get("side") or "unknown").lower().strip()
+    event = str(signal.get("event") or payload.get("event") or "unknown").upper().strip()
+
+    return f"{symbol}_{tf}_{side}_{event}_{int(time.time() * 1000)}"
+
+
+def extract_event_id(payload: Dict[str, Any]) -> str:
+    signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
+
+    candidates = [
+        payload.get("event_id"),
+        payload.get("event_uid"),
+        signal.get("event_uid"),
+    ]
+
+    for c in candidates:
+        if c is not None and str(c).strip():
+            return str(c).strip()
+
+    setup_id = extract_setup_id(payload)
+    return f"{setup_id}_{int(time.time() * 1000)}"
+
+
+def build_technical_state_for_db(payload: Dict[str, Any], validation_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
+    context = payload.get("context", {}) if isinstance(payload.get("context"), dict) else {}
+    movement = payload.get("movement", {}) if isinstance(payload.get("movement"), dict) else {}
+    liquidity = payload.get("liquidity", {}) if isinstance(payload.get("liquidity"), dict) else {}
+    trigger = payload.get("trigger", {}) if isinstance(payload.get("trigger"), dict) else {}
+    htf_context = payload.get("htf_context", {}) if isinstance(payload.get("htf_context"), dict) else {}
+
+    market_snapshot = {}
+    structure_snapshot = {}
+    if isinstance(validation_result, dict):
+        val = validation_result.get("validation", {}) if isinstance(validation_result.get("validation"), dict) else {}
+        market_snapshot = val.get("market_snapshot", {}) if isinstance(val.get("market_snapshot"), dict) else {}
+        structure_snapshot = val.get("structure_snapshot", {}) if isinstance(val.get("structure_snapshot"), dict) else {}
+
+    return sanitize_for_json({
+        "symbol": signal.get("symbol") or payload.get("symbol") or payload.get("ticker"),
+        "timeframe": signal.get("tf") or payload.get("tf") or payload.get("timeframe"),
+        "event": signal.get("event") or payload.get("event"),
+        "side": signal.get("side") or payload.get("side"),
+        "phase": context.get("phase"),
+        "regime": context.get("regime"),
+        "dir_state": context.get("dir_state"),
+        "raw_dir_state": context.get("raw_dir_state"),
+        "phase_strength": context.get("phase_strength"),
+        "regime_strength": context.get("regime_strength"),
+        "mov_state": movement.get("mov_state"),
+        "liq_state": liquidity.get("liq_state"),
+        "sweep_high": liquidity.get("sweep_high"),
+        "sweep_low": liquidity.get("sweep_low"),
+        "absorb_bull": liquidity.get("absorb_bull"),
+        "absorb_bear": liquidity.get("absorb_bear"),
+        "trigger_alignment": trigger.get("trigger_alignment"),
+        "trigger_long": trigger.get("trigger_long"),
+        "trigger_short": trigger.get("trigger_short"),
+        "ast_dir": trigger.get("ast_dir"),
+        "hull_bull": trigger.get("hull_bull"),
+        "hull_bear": trigger.get("hull_bear"),
+        "ast_bull": trigger.get("ast_bull"),
+        "ast_bear": trigger.get("ast_bear"),
+        "trigger_age_bars": trigger.get("trigger_age_bars"),
+        "htf_tf": htf_context.get("htf_tf"),
+        "htf_phase": htf_context.get("htf_phase"),
+        "htf_phase_strength": htf_context.get("htf_phase_strength"),
+        "htf_phase_bias": htf_context.get("htf_phase_bias"),
+        "htf_adx": htf_context.get("htf_adx"),
+        "market_snapshot": market_snapshot,
+        "structure_snapshot": structure_snapshot
+    })
+
+
+def build_microstructure_state_for_db(validation_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if not isinstance(validation_result, dict):
+        return {}
+
+    validation = validation_result.get("validation", {}) if isinstance(validation_result.get("validation"), dict) else {}
+    market_snapshot = validation.get("market_snapshot", {}) if isinstance(validation.get("market_snapshot"), dict) else {}
+
+    return sanitize_for_json({
+        "spread_bps": market_snapshot.get("spread_bps"),
+        "book_imbalance": market_snapshot.get("book_imbalance"),
+        "buy_aggression": market_snapshot.get("buy_aggression"),
+        "sell_aggression": market_snapshot.get("sell_aggression"),
+        "delta_qty": market_snapshot.get("delta_qty"),
+        "bid_wall_detected": market_snapshot.get("bid_wall_detected"),
+        "ask_wall_detected": market_snapshot.get("ask_wall_detected"),
+        "vacuum_above": market_snapshot.get("vacuum_above"),
+        "vacuum_below": market_snapshot.get("vacuum_below"),
+        "adx_1m": market_snapshot.get("adx_1m"),
+        "plus_di_1m": market_snapshot.get("plus_di_1m"),
+        "minus_di_1m": market_snapshot.get("minus_di_1m"),
+        "atr14_1m": market_snapshot.get("atr14_1m"),
+        "rvol20_1m": market_snapshot.get("rvol20_1m"),
+        "impulse_atr_1m": market_snapshot.get("impulse_atr_1m"),
+        "dist_to_vwap_pct_1m": market_snapshot.get("dist_to_vwap_pct_1m")
+    })
+
+
+def build_normalized_payload_for_db(payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        normalized = normalize_alert(payload)
+        return sanitize_for_json(normalized)
+    except Exception:
+        return sanitize_for_json(payload)
+
+
+def build_lifecycle_state(payload: Dict[str, Any], validation_result: Optional[Dict[str, Any]] = None) -> str:
+    signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
+    event = str(signal.get("event") or payload.get("event") or "").upper().strip()
+
+    if event in {"WATCH", "LONG_WATCH", "SHORT_WATCH"}:
+        return "WATCH"
+    if event in {"ARMED", "LONG_ARMED", "SHORT_ARMED"}:
+        return "ARMED"
+    if event in {"LONG_ENTRY", "SHORT_ENTRY", "REAL_LONG_ENTRY", "REAL_SHORT_ENTRY"}:
+        if isinstance(validation_result, dict):
+            validation = validation_result.get("validation", {}) if isinstance(validation_result.get("validation"), dict) else {}
+            if validation.get("approve") is True:
+                return "VALIDATED"
+            return "REJECTED"
+        return "ENTRY_PENDING"
+    if event in {"REAL_LONG_ENTRY", "REAL_SHORT_ENTRY", "EXECUTED_ENTRY"}:
+        return "OPEN"
+    if event in {"EXECUTED_EXIT"}:
+        return "CLOSED"
+    if event in {"CANCEL"}:
+        return "CANCELLED"
+
+    return event or "UNKNOWN"
+
+
+async def supabase_insert_alert_event(payload: Dict[str, Any], validation_result: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    if not SUPABASE_ENABLED or supabase is None:
+        return None
+
+    signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
+    event_id = extract_event_id(payload)
+    setup_id = extract_setup_id(payload)
+
+    row = {
+        "event_id": event_id,
+        "setup_id": setup_id,
+        "symbol": str(signal.get("symbol") or payload.get("symbol") or payload.get("ticker") or "UNKNOWN").upper().strip(),
+        "timeframe": str(signal.get("tf") or payload.get("tf") or payload.get("timeframe") or "UNKNOWN").strip(),
+        "strategy_name": payload.get("strategy_name"),
+        "alert_type": str(signal.get("event") or payload.get("event") or "UNKNOWN").upper().strip(),
+        "side": str(signal.get("side") or payload.get("side") or "").lower().strip() or None,
+        "source": "tradingview",
+        "status": build_lifecycle_state(payload, validation_result),
+        "raw_payload": sanitize_for_json(payload),
+        "normalized_payload": build_normalized_payload_for_db(payload),
+        "technical_state": build_technical_state_for_db(payload, validation_result),
+        "microstructure_state": build_microstructure_state_for_db(validation_result),
+    }
+
+    try:
+        resp = supabase.table("alert_events").upsert(row, on_conflict="event_id").execute()
+        data = resp.data or []
+        if data and isinstance(data, list):
+            inserted_id = data[0].get("id")
+            log_event("supabase_alert_event_upsert_ok", {
+                "event_id": event_id,
+                "setup_id": setup_id,
+                "db_id": inserted_id
+            })
+            return inserted_id
+
+        log_event("supabase_alert_event_upsert_ok", {
+            "event_id": event_id,
+            "setup_id": setup_id,
+            "db_id": None
+        })
+        return None
+
+    except Exception as e:
+        log_event("supabase_alert_event_upsert_error", {
+            "event_id": event_id,
+            "setup_id": setup_id,
+            "error": str(e)
+        })
+        return None
+
+
+async def supabase_upsert_trade_setup(payload: Dict[str, Any], validation_result: Optional[Dict[str, Any]] = None, alert_event_db_id: Optional[str] = None) -> None:
+    if not SUPABASE_ENABLED or supabase is None:
+        return
+
+    signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
+    setup_id = extract_setup_id(payload)
+
+    validation = validation_result.get("validation", {}) if isinstance(validation_result, dict) else {}
+
+    row = {
+        "setup_id": setup_id,
+        "symbol": str(signal.get("symbol") or payload.get("symbol") or payload.get("ticker") or "UNKNOWN").upper().strip(),
+        "timeframe": str(signal.get("tf") or payload.get("tf") or payload.get("timeframe") or "UNKNOWN").strip(),
+        "side": str(signal.get("side") or payload.get("side") or "").lower().strip() or None,
+        "lifecycle_state": build_lifecycle_state(payload, validation_result),
+        "last_alert_event_id": alert_event_db_id,
+        "confidence": safe_float(validation.get("confidence")),
+        "validation_status": (
+            "accepted" if validation.get("approve") is True else
+            "rejected" if validation.get("approve") is False else
+            "pending"
+        ),
+        "entry_price": safe_float(validation.get("entry_price")),
+        "stop_loss": safe_float(validation.get("sl")),
+        "take_profit": safe_float(validation.get("tp")),
+        "latest_context": build_technical_state_for_db(payload, validation_result),
+        "latest_validation": sanitize_for_json(validation) if validation else None,
+        "metadata": sanitize_for_json({
+            "event_uid": payload.get("event_uid"),
+            "message_type": payload.get("message_type"),
+            "schema_version": payload.get("schema_version")
+        }),
+        "updated_at": utc_now_iso()
+    }
+
+    try:
+        supabase.table("trade_setups").upsert(row, on_conflict="setup_id").execute()
+        log_event("supabase_trade_setup_upsert_ok", {
+            "setup_id": setup_id,
+            "lifecycle_state": row["lifecycle_state"]
+        })
+    except Exception as e:
+        log_event("supabase_trade_setup_upsert_error", {
+            "setup_id": setup_id,
+            "error": str(e)
+        })
+
+
+async def supabase_insert_validation_result(payload: Dict[str, Any], validation_result: Optional[Dict[str, Any]] = None, alert_event_db_id: Optional[str] = None) -> None:
+    if not SUPABASE_ENABLED or supabase is None:
+        return
+
+    if not isinstance(validation_result, dict):
+        return
+
+    validation = validation_result.get("validation", {}) if isinstance(validation_result.get("validation"), dict) else {}
+    if not validation:
+        return
+
+    row = {
+        "setup_id": extract_setup_id(payload),
+        "alert_event_id": alert_event_db_id,
+        "accepted": bool(validation.get("approve", False)),
+        "confidence": safe_float(validation.get("confidence")),
+        "probability_tp": safe_float(validation.get("probability_tp_before_sl")),
+        "probability_sl": round(1.0 - safe_float(validation.get("probability_tp_before_sl"), 0.0), 4) if validation.get("probability_tp_before_sl") is not None else None,
+        "rr_estimate": safe_float(validation.get("rr")),
+        "validation_reason": "; ".join(validation.get("reason", [])[:12]) if isinstance(validation.get("reason"), list) else None,
+        "model_version": os.getenv("VALIDATION_MODEL_VERSION", "rules_v1"),
+        "validator_name": "validation_layer",
+        "features": sanitize_for_json({
+            "alert_reused": validation.get("alert_reused"),
+            "market_snapshot": validation.get("market_snapshot"),
+            "structure_snapshot": validation.get("structure_snapshot"),
+            "validation_steps": validation.get("validation_steps")
+        }),
+        "decision_payload": sanitize_for_json(validation_result)
+    }
+
+    try:
+        supabase.table("validation_results").insert(row).execute()
+        log_event("supabase_validation_result_insert_ok", {
+            "setup_id": row["setup_id"],
+            "accepted": row["accepted"]
+        })
+    except Exception as e:
+        log_event("supabase_validation_result_insert_error", {
+            "setup_id": row["setup_id"],
+            "error": str(e)
+        })
+
+
+async def persist_to_supabase(payload: Dict[str, Any], validation_result: Optional[Dict[str, Any]] = None) -> None:
+    if not SUPABASE_ENABLED or supabase is None:
+        return
+
+    try:
+        alert_event_db_id = await supabase_insert_alert_event(payload, validation_result)
+        await supabase_upsert_trade_setup(payload, validation_result, alert_event_db_id)
+        await supabase_insert_validation_result(payload, validation_result, alert_event_db_id)
+    except Exception as e:
+        log_event("supabase_persist_error", {
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        })
 # VALIDATION STEPS
 #validación de evento
 #validación de contexto
@@ -1923,7 +2263,19 @@ async def tradingview_webhook(
             "history_size": len(ALERT_HISTORY),
             "history_item": history_item
         })
-
+        # ------------------------------------------------------------
+        # STEP 5B - PERSIST SUPABASE
+        # ------------------------------------------------------------
+        try:
+            t0_supabase = time.perf_counter()
+            await persist_to_supabase(payload, LAST_VALIDATION)
+            supabase_ms = round((time.perf_counter() - t0_supabase) * 1000, 2)
+            log_event("metric_supabase_persist_time", {"ms": supabase_ms})
+        except Exception as e:
+            log_event("step_5b_supabase_persist_error", {
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            })
         # ------------------------------------------------------------
         # STEP 6 - RESPONSE
         # ------------------------------------------------------------
@@ -1984,3 +2336,30 @@ async def root_webhook(
     x_webhook_secret: Optional[str] = Header(default=None)
 ):
     return await tradingview_webhook(request=request, x_webhook_secret=x_webhook_secret)
+@app.get("/api/health/supabase")
+async def health_supabase():
+    if not SUPABASE_ENABLED or supabase is None:
+        return {
+            "ok": False,
+            "enabled": False,
+            "message": "Supabase not configured"
+        }
+
+    try:
+        resp = supabase.table("trade_setups").select("id", count="exact").limit(1).execute()
+        return {
+            "ok": True,
+            "enabled": True,
+            "message": "Supabase connection OK",
+            "sample_count": resp.count
+        }
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "enabled": True,
+                "message": "Supabase connection failed",
+                "error": str(e)
+            }
+        )
