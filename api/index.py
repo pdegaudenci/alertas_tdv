@@ -2406,6 +2406,45 @@ async def get_alerts(limit: int = 50):
         "count": len(items),
         "items": items
     }
+@app.get("/api/setups/supabase")
+async def get_setups_supabase(limit: int = 50):
+    if not SUPABASE_ENABLED or supabase is None:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "message": "Supabase not configured"
+            }
+        )
+
+    try:
+        resp = (
+            supabase
+            .table("trade_setups")
+            .select("*")
+            .order("updated_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+
+        rows = resp.data or []
+
+        return {
+            "ok": True,
+            "count": len(rows),
+            "items": sanitize_for_json(rows)
+        }
+
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "message": "Could not read trade_setups from Supabase",
+                "error": str(e)
+            }
+        )
+
 @app.post("/")
 async def root_webhook(
     request: Request,
