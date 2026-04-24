@@ -71,7 +71,40 @@ app = FastAPI(title="TradingView Validation Layer", version="1.0.0")
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("validation-layer")
 
+def mask_secret_value(value: Any) -> Any:
+    if value is None:
+        return None
+    text = str(value)
+    if len(text) <= 8:
+        return "***"
+    return f"{text[:4]}...{text[-4:]}"
 
+
+def safe_payload_for_log(payload: Dict[str, Any]) -> Dict[str, Any]:
+    clean = sanitize_for_json(payload)
+
+    if isinstance(clean, dict):
+        if "secret" in clean:
+            clean["secret"] = "***MASKED***"
+
+        headers = clean.get("headers")
+        if isinstance(headers, dict):
+            for k in list(headers.keys()):
+                if "secret" in k.lower() or "authorization" in k.lower():
+                    headers[k] = "***MASKED***"
+
+    return clean
+
+
+def make_trace_id() -> str:
+    return f"trace_{int(time.time() * 1000)}"
+
+
+def log_trace(trace_id: str, step: str, data: Dict[str, Any] | None = None):
+    log_event(step, {
+        "trace_id": trace_id,
+        **(safe_payload_for_log(data or {}))
+    })
 def log_event(event_type: str, data: dict):
     try:
         payload = {
@@ -2159,6 +2192,14 @@ async def tradingview_webhook(
 
     try:
         t0_total = time.perf_counter()
+        trace_id = make_trace_id()
+
+        log_trace(trace_id, "webhook_received_start", {
+            "path": str(request.url.path),
+            "method": request.method,
+            "query_params": dict(request.query_params),
+            "client": request.client.host if request.client else None
+        })
 
         # ------------------------------------------------------------
         # STEP 0 - AUTH
