@@ -17,10 +17,53 @@ import logging
 import traceback
 
 from supabase import create_client, Client
+
+# ============================================================
+# UTILS BASE - deben ir antes de log_event
+# ============================================================
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def sanitize_for_json(value: Any) -> Any:
+    if value is None:
+        return None
+
+    if isinstance(value, (str, bool, int)):
+        return value
+
+    if isinstance(value, (float, np.floating)):
+        v = float(value)
+        if math.isnan(v) or math.isinf(v):
+            return None
+        return v
+
+    if isinstance(value, (np.integer,)):
+        return int(value)
+
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+
+    if isinstance(value, dict):
+        return {str(k): sanitize_for_json(v) for k, v in value.items()}
+
+    if isinstance(value, (list, tuple, set)):
+        return [sanitize_for_json(v) for v in value]
+
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+
+    return value
+
+
 # ============================================================
 # APP
 # ============================================================
 app = FastAPI(title="TradingView Validation Layer", version="1.0.0")
+
 
 # ==========================================================
 # LOGGER JSON PARA VERCEL
@@ -41,9 +84,9 @@ def log_event(event_type: str, data: dict):
         logger.info(
             json.dumps({
                 "log_type": "log_error",
-                "timestamp": utc_now_iso(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "error": str(e)
-            })
+            }, ensure_ascii=False, default=str)
         )
 # ============================================================
 # CORS - Streamlit / dashboards
@@ -148,44 +191,6 @@ def is_bad_number(value: Any) -> bool:
         return False
 
 
-def sanitize_for_json(value: Any) -> Any:
-    """
-    Convierte NaN/Inf a None y normaliza tipos numpy/pandas
-    para que JSONResponse no falle.
-    """
-    if value is None:
-        return None
-
-    if isinstance(value, (str, bool, int)):
-        return value
-
-    if isinstance(value, (float, np.floating)):
-        v = float(value)
-        if math.isnan(v) or math.isinf(v):
-            return None
-        return v
-
-    if isinstance(value, (np.integer,)):
-        return int(value)
-
-    if isinstance(value, pd.Timestamp):
-        return value.isoformat()
-
-    if isinstance(value, dict):
-        return {str(k): sanitize_for_json(v) for k, v in value.items()}
-
-    if isinstance(value, (list, tuple, set)):
-        return [sanitize_for_json(v) for v in value]
-
-    try:
-        if pd.isna(value):
-            return None
-    except Exception:
-        pass
-
-    return value
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 def parse_payload(raw_body: bytes) -> dict:
     text_body = raw_body.decode("utf-8", errors="replace").strip()
