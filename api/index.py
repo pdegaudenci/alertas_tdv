@@ -2393,25 +2393,38 @@ async def get_alerts_supabase(limit: int = 50):
             status_code=500,
             content={
                 "ok": False,
-                "message": "Supabase not configured"
+                "message": "Supabase not configured",
+                "items": []
             }
         )
 
     try:
         limit = max(1, min(int(limit), 100))
 
-        client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        url = f"{SUPABASE_URL}/rest/v1/alert_events"
 
-        resp = (
-            client
-            .table("alert_events")
-            .select("*")
-            .order("created_at", desc=True)
-            .limit(limit)
-            .execute()
+        headers = {
+            "apikey": SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+        params = {
+            "select": "*",
+            "order": "created_at.desc",
+            "limit": str(limit),
+        }
+
+        response = requests.get(
+            url,
+            headers=headers,
+            params=params,
+            timeout=20
         )
+        response.raise_for_status()
 
-        rows = resp.data or []
+        rows = response.json() or []
 
         items = []
         for row in rows:
@@ -2461,7 +2474,7 @@ async def get_alerts_supabase(limit: int = 50):
             status_code=500,
             content={
                 "ok": False,
-                "message": "Could not read alerts from Supabase",
+                "message": "Could not read alerts from Supabase REST",
                 "error": str(e),
                 "items": []
             }
