@@ -2326,10 +2326,9 @@ async def tradingview_webhook(
             status_code=500,
             content=error_response
         )
-
 @app.get("/api/alerts/supabase")
 async def get_alerts_supabase(limit: int = 50):
-    if not SUPABASE_ENABLED or supabase is None:
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         return JSONResponse(
             status_code=500,
             content={
@@ -2339,8 +2338,12 @@ async def get_alerts_supabase(limit: int = 50):
         )
 
     try:
+        limit = max(1, min(int(limit), 100))
+
+        client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
         resp = (
-            supabase
+            client
             .table("alert_events")
             .select("*")
             .order("created_at", desc=True)
@@ -2393,12 +2396,14 @@ async def get_alerts_supabase(limit: int = 50):
             "error": str(e),
             "traceback": traceback.format_exc()
         })
+
         return JSONResponse(
             status_code=500,
             content={
                 "ok": False,
                 "message": "Could not read alerts from Supabase",
-                "error": str(e)
+                "error": str(e),
+                "items": []
             }
         )
         
