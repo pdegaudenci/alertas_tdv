@@ -121,6 +121,83 @@ def log_event(event_type: str, data: dict):
                 "error": str(e)
             }, ensure_ascii=False, default=str)
         )
+def send_telegram_message(text: str, trace_id: str = "-") -> bool:
+    if not TELEGRAM_ENABLED:
+        log_trace(trace_id, "telegram_skipped", {"reason": "disabled"})
+        return False
+
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        log_trace(trace_id, "telegram_skipped", {"reason": "missing_env_vars"}, level="ERROR")
+        return False
+
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }
+
+        response = requests.post(url, json=payload, timeout=10)
+        response.raise_for_status()
+
+        log_trace(trace_id, "telegram_sent_ok", {
+            "chat_id": mask_secret_value(TELEGRAM_CHAT_ID),
+            "status_code": response.status_code
+        })
+
+        return True
+
+    except Exception as e:
+        log_trace(trace_id, "telegram_sent_error", {
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }, level="ERROR")
+        return False
+def build_telegram_entry_message(validation_result: Dict[str, Any]) -> str:
+    validation = validation_result.get("validation", {}) if isinstance(validation_result, dict) else {}
+
+    symbol = validation.get("symbol", "-")
+    side = str(validation.get("side", "-")).upper()
+    event = validation.get("event", "-")
+    entry = validation.get("entry_price", "-")
+    tp = validation.get("tp", "-")
+    sl = validation.get("sl", "-")
+    rr = validation.get("rr", "-")
+    confidence = validation.get("confidence", "-")
+    prob = validation.get("probability_tp_before_sl", "-")
+    score = validation.get("score_external", "-")
+
+    reasons = validation.get("reason", []) or []
+    penalties = validation.get("penalties", []) or []
+
+    reasons_txt = "\n".join([f"✅ {r}" for r in reasons[:5]]) if reasons else "Sin razones registradas"
+    penalties_txt = "\n".join([f"⚠️ {p}" for p in penalties[:5]]) if penalties else "Sin penalizaciones"
+
+    return f"""
+🚀 <b>ENTRY VALIDADA OK</b>
+
+<b>Symbol:</b> {symbol}
+<b>Side:</b> {side}
+<b>Event:</b> {event}
+
+<b>Entry:</b> {entry}
+<b>TP:</b> {tp}
+<b>SL:</b> {sl}
+<b>RR:</b> {rr}
+
+<b>Confidence:</b> {confidence}%
+<b>Prob TP antes SL:</b> {prob}
+<b>Score externo:</b> {score}
+
+<b>Razones:</b>
+{reasons_txt}
+
+<b>Penalizaciones:</b>
+{penalties_txt}
+""".strip()
 # ============================================================
 # CORS - Streamlit / dashboards
 # ============================================================
@@ -166,7 +243,9 @@ WEBHOOK_SECRET_ENV = os.getenv("WEBHOOK_SECRET", "")
 VALIDATION_THRESHOLD = float(os.getenv("VALIDATION_THRESHOLD", "0.62"))
 MIN_SCORE_THRESHOLD = float(os.getenv("MIN_SCORE_THRESHOLD", "55"))
 REQUEST_TIMEOUT_SEC = float(os.getenv("REQUEST_TIMEOUT_SEC", "8.0"))
-
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+TELEGRAM_ENABLED = os.getenv("TELEGRAM_ENABLED", "false").lower() == "true"
 # Optional ML hook
 SKLEARN_MODEL = None
 SKLEARN_FEATURE_ORDER: List[str] = []
@@ -2339,7 +2418,17 @@ async def tradingview_webhook(
             log_event("metric_validation_time", {"ms": validation_ms})
 
             LAST_VALIDATION = sanitize_for_json(validation_result)
+            validation_block = LAST_VALIDATION.get("validation", {}) if isinstance(LAST_VALIDATION, dict) else {}
 
+            if validation_block.get("approve") is True:
+                telegram_text = build_telegram_entry_message(LAST_VALIDATION)
+                send_telegram_message(telegram_text, trace_id=trace_id)
+            else:
+                log_trace(trace_id, "telegram_not_sent", {
+                    "reason": "entry_not_approved",
+                    "approve": validation_block.get("approve"),
+                    "confidence": validation_block.get("confidence")
+                })
             log_event("step_3_validation_done", {
                 "validation_result": LAST_VALIDATION
             })
