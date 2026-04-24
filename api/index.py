@@ -2400,7 +2400,10 @@ async def get_alerts_supabase(limit: int = 50):
 
     try:
         limit = max(1, min(int(limit), 100))
-
+        log_event("supabase_url_debug", {
+            "supabase_url": SUPABASE_URL,
+            "host": SUPABASE_URL.replace("https://", "").replace("http://", "")
+        })
         url = f"{SUPABASE_URL}/rest/v1/alert_events"
 
         headers = {
