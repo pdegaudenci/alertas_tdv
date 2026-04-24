@@ -1620,16 +1620,51 @@ async def supabase_insert_validation_result(payload: Dict[str, Any], validation_
         })
 
 
-async def persist_to_supabase(payload: Dict[str, Any], validation_result: Optional[Dict[str, Any]] = None) -> None:
+async def persist_to_supabase(
+    payload: Dict[str, Any],
+    validation_result: Optional[Dict[str, Any]] = None,
+    trace_id: str = "-"
+) -> None:
     if not SUPABASE_ENABLED or supabase is None:
+        log_trace(trace_id, "supabase_persist_skipped", {
+            "enabled": SUPABASE_ENABLED,
+            "client_available": supabase is not None
+        })
         return
 
     try:
+        log_trace(trace_id, "supabase_persist_start", {
+            "event": nested_get(payload, "signal", "event"),
+            "side": nested_get(payload, "signal", "side"),
+            "symbol": nested_get(payload, "signal", "symbol"),
+            "setup_id": extract_setup_id(payload),
+            "event_id": extract_event_id(payload)
+        })
+
         alert_event_db_id = await supabase_insert_alert_event(payload, validation_result)
+
+        log_trace(trace_id, "supabase_alert_event_done", {
+            "alert_event_db_id": alert_event_db_id
+        })
+
         await supabase_upsert_trade_setup(payload, validation_result, alert_event_db_id)
+
+        log_trace(trace_id, "supabase_trade_setup_done", {
+            "setup_id": extract_setup_id(payload)
+        })
+
         await supabase_insert_validation_result(payload, validation_result, alert_event_db_id)
+
+        log_trace(trace_id, "supabase_validation_result_done", {
+            "setup_id": extract_setup_id(payload)
+        })
+
+        log_trace(trace_id, "supabase_persist_done", {
+            "ok": True
+        })
+
     except Exception as e:
-        log_event("supabase_persist_error", {
+        log_trace(trace_id, "supabase_persist_error", {
             "error": str(e),
             "traceback": traceback.format_exc()
         })
@@ -2215,7 +2250,7 @@ async def tradingview_webhook(
         raw_body = await request.body()
         raw_text = raw_body.decode("utf-8", errors="replace")
 
-        log_event("step_1_raw_received", {
+        log_trace(trace_id, "step_1_raw_received", {
             "headers": {
                 "content_type": request.headers.get("content-type", ""),
                 "user_agent": request.headers.get("user-agent", "")
@@ -2374,7 +2409,7 @@ async def tradingview_webhook(
         # ------------------------------------------------------------
         try:
             t0_supabase = time.perf_counter()
-            await persist_to_supabase(payload, LAST_VALIDATION)
+            await persist_to_supabase(payload, LAST_VALIDATION, trace_id=trace_id)
             supabase_ms = round((time.perf_counter() - t0_supabase) * 1000, 2)
             log_event("metric_supabase_persist_time", {"ms": supabase_ms})
         except Exception as e:
