@@ -15,7 +15,7 @@ import pandas as pd
 from scipy.special import expit
 import logging
 import traceback
-
+import requests
 from supabase import create_client, Client
 
 # ============================================================
