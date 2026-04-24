@@ -267,10 +267,68 @@ def build_log(route: str, payload: dict, headers: dict | None = None) -> dict:
         "quality_score": quality.get("quality_score") or canonical.get("quality_score") or canonical.get("score"),
         "headers": headers or {},
     }
+def ensure_canonical_schema(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+
+    out = dict(payload)
+
+    signal = out.get("signal", {}) if isinstance(out.get("signal"), dict) else {}
+    execution = out.get("execution", {}) if isinstance(out.get("execution"), dict) else {}
+    context = out.get("context", {}) if isinstance(out.get("context"), dict) else {}
+
+    out["signal"] = {
+        **signal,
+        "symbol": signal.get("symbol") or out.get("symbol") or out.get("ticker") or "BTCUSDC",
+        "tf": signal.get("tf") or out.get("tf") or out.get("timeframe") or "1m",
+        "event": signal.get("event") or out.get("event"),
+        "side": signal.get("side") or out.get("side"),
+        "price": signal.get("market_price") or signal.get("entry_price") or out.get("price"),
+        "entry_price": signal.get("entry_price") or signal.get("market_price") or out.get("price"),
+        "setup": signal.get("setup") or signal.get("setup_state") or out.get("setup"),
+    }
+
+    out["context"] = {
+        **context,
+        "regime": context.get("regime") or out.get("regime"),
+        "phase": context.get("phase") or out.get("phase"),
+        "dir_state": context.get("dir_state"),
+        "mov_state": context.get("mov_state"),
+        "liq_state": context.get("liq_state"),
+    }
+
+    out["trade_plan"] = {
+        **(out.get("trade_plan", {}) if isinstance(out.get("trade_plan"), dict) else {}),
+        "tp_price": execution.get("tp_price"),
+        "sl_price": execution.get("sl_price"),
+        "rr_ratio": execution.get("rr_ratio"),
+        "distance_to_tp_pct": execution.get("distance_to_tp_pct"),
+        "distance_to_sl_pct": execution.get("distance_to_sl_pct"),
+    }
+
+    return out
+
+
+def assemble_event_payload(payload_raw: Dict[str, Any]) -> Dict[str, Any]:
+    return ensure_canonical_schema(payload_raw)
+
+
+def should_validate_payload(payload: Dict[str, Any]) -> bool:
+    signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
+    event = str(signal.get("event") or payload.get("event") or "").upper()
+
+    return event in {
+        "LONG_ENTRY",
+        "SHORT_ENTRY",
+        "REAL_LONG_ENTRY",
+        "REAL_SHORT_ENTRY",
+    }
+    
 
 # ============================================================
 # ALERT NORMALIZATION
 # ============================================================
+
 def normalize_alert(payload: Dict[str, Any]) -> Dict[str, Any]:
     canonical = ensure_canonical_schema(payload)
 
@@ -300,8 +358,10 @@ def normalize_alert(payload: Dict[str, Any]) -> Dict[str, Any]:
         signal.get("close") or
         canonical.get("price")
     )
-    tp_price = safe_float(trade_plan.get("tp_price"))
-    sl_price = safe_float(trade_plan.get("sl_price"))
+    execution = canonical.get("execution", {}) if isinstance(canonical.get("execution"), dict) else {}
+    
+    tp_price = safe_float(trade_plan.get("tp_price") or execution.get("tp_price"))
+    sl_price = safe_float(trade_plan.get("sl_price") or execution.get("sl_price"))
 
     if side not in {"long", "short"}:
         if "LONG" in event:
@@ -381,9 +441,9 @@ def normalize_alert(payload: Dict[str, Any]) -> Dict[str, Any]:
         "htf_phase_strength": safe_float(htf_context.get("htf_phase_strength")),
         "htf_phase_bias": htf_context.get("htf_phase_bias"),
         "htf_adx": safe_float(htf_context.get("htf_adx")),
-        "rr_ratio_alert": safe_float(trade_plan.get("rr_ratio")),
-        "distance_to_tp_pct_alert": safe_float(trade_plan.get("distance_to_tp_pct")),
-        "distance_to_sl_pct_alert": safe_float(trade_plan.get("distance_to_sl_pct")),
+        "rr_ratio_alert": safe_float(trade_plan.get("rr_ratio") or execution.get("rr_ratio")),
+        "distance_to_tp_pct_alert": safe_float(trade_plan.get("distance_to_tp_pct") or execution.get("distance_to_tp_pct")),
+        "distance_to_sl_pct_alert": safe_float(trade_plan.get("distance_to_sl_pct") or execution.get("distance_to_sl_pct")),
         "tp_perc_alert": safe_float(trade_plan.get("tp_perc")),
         "sl_perc_alert": safe_float(trade_plan.get("sl_perc")),
     }
