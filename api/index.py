@@ -100,9 +100,10 @@ def make_trace_id() -> str:
     return f"trace_{int(time.time() * 1000)}"
 
 
-def log_trace(trace_id: str, step: str, data: Dict[str, Any] | None = None):
+def log_trace(trace_id: str, step: str, data: Dict[str, Any] | None = None, level: str = "INFO"):
     log_event(step, {
         "trace_id": trace_id,
+        "level": level,
         **(safe_payload_for_log(data or {}))
     })
 def log_event(event_type: str, data: dict):
@@ -409,13 +410,15 @@ def ensure_canonical_schema(payload: Dict[str, Any]) -> Dict[str, Any]:
         "liq_state": context.get("liq_state"),
     }
 
+    existing_trade_plan = out.get("trade_plan", {}) if isinstance(out.get("trade_plan"), dict) else {}
+    
     out["trade_plan"] = {
-        **(out.get("trade_plan", {}) if isinstance(out.get("trade_plan"), dict) else {}),
-        "tp_price": execution.get("tp_price"),
-        "sl_price": execution.get("sl_price"),
-        "rr_ratio": execution.get("rr_ratio"),
-        "distance_to_tp_pct": execution.get("distance_to_tp_pct"),
-        "distance_to_sl_pct": execution.get("distance_to_sl_pct"),
+        **existing_trade_plan,
+        "tp_price": existing_trade_plan.get("tp_price") or execution.get("tp_price"),
+        "sl_price": existing_trade_plan.get("sl_price") or execution.get("sl_price"),
+        "rr_ratio": existing_trade_plan.get("rr_ratio") or execution.get("rr_ratio"),
+        "distance_to_tp_pct": existing_trade_plan.get("distance_to_tp_pct") or execution.get("distance_to_tp_pct"),
+        "distance_to_sl_pct": existing_trade_plan.get("distance_to_sl_pct") or execution.get("distance_to_sl_pct"),
     }
 
     return out
@@ -428,14 +431,12 @@ def assemble_event_payload(payload_raw: Dict[str, Any]) -> Dict[str, Any]:
 def should_validate_payload(payload: Dict[str, Any]) -> bool:
     signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
     event = str(signal.get("event") or payload.get("event") or "").upper()
+    message_type = str(payload.get("message_type") or "").lower()
 
-    return event in {
+    return message_type == "logical_event_core" and event in {
         "LONG_ENTRY",
         "SHORT_ENTRY",
-        "REAL_LONG_ENTRY",
-        "REAL_SHORT_ENTRY",
     }
-    
 
 # ============================================================
 # ALERT NORMALIZATION
@@ -516,8 +517,8 @@ def normalize_alert(payload: Dict[str, Any]) -> Dict[str, Any]:
         "phase": context.get("phase"),
         "dir_state": context.get("dir_state"),
         "raw_dir_state": context.get("raw_dir_state"),
-        "phase_strength": safe_float(context.get("phase_strength")),
-        "regime_strength": safe_float(context.get("regime_strength")),
+        "phase_strength": strength_to_score(context.get("phase_strength")),
+        "regime_strength": strength_to_score(context.get("regime_strength")),
         "mov_state": movement.get("mov_state"),
         "adx_alert": safe_float(movement.get("adx")),
         "plus_di_alert": safe_float(movement.get("plus_di")),
@@ -550,7 +551,7 @@ def normalize_alert(payload: Dict[str, Any]) -> Dict[str, Any]:
         "trigger_age_bars": safe_int(trigger.get("trigger_age_bars"), 999),
         "htf_tf": htf_context.get("htf_tf"),
         "htf_phase": htf_context.get("htf_phase"),
-        "htf_phase_strength": safe_float(htf_context.get("htf_phase_strength")),
+        "htf_phase_strength": strength_to_score(htf_context.get("htf_phase_strength")),
         "htf_phase_bias": htf_context.get("htf_phase_bias"),
         "htf_adx": safe_float(htf_context.get("htf_adx")),
         "rr_ratio_alert": safe_float(trade_plan.get("rr_ratio") or execution.get("rr_ratio")),
@@ -1401,16 +1402,55 @@ def extract_latest_features(df: pd.DataFrame) -> Dict[str, float]:
         "ret_mean_20": safe_float(rets20.mean(), 0.0),
         "ret_std_20": max(safe_float(rets20.std(), 0.001), 1e-6),
     }
+
+def strength_to_score(value: Any) -> float:
+    txt = str(value or "").upper()
+    if txt == "STRONG":
+        return 90.0
+    if txt == "VALID":
+        return 75.0
+    if txt == "NORMAL":
+        return 70.0
+    if txt == "TRANSITION":
+        return 50.0
+    if txt == "WEAK":
+        return 30.0
+    if txt == "INVALID":
+        return 0.0
+    return safe_float(value, 0.0)
 # ============================================================
 # SUPABASE HELPERS
 # ============================================================
+
+def should_persist_payload(payload: Dict[str, Any]) -> bool:
+    source = payload.get("source", {}) if isinstance(payload.get("source"), dict) else {}
+    script = str(source.get("script") or payload.get("strategy_name") or "").strip()
+    message_type = str(payload.get("message_type") or "").strip()
+    quality = payload.get("quality", {}) if isinstance(payload.get("quality"), dict) else {}
+
+    if script == "PHASE_INDICATOR_V8_FULL_ALERTS":
+        return True
+
+    if script == "SETUP_CLASSIFIER_MASTER_v7_3_FULL_API_ALERTS":
+        if message_type == "logical_event_core":
+            return quality.get("quality_approved") is True
+
+        if message_type == "logical_event_extra":
+            return True
+
+    return False
 def extract_setup_id(payload: Dict[str, Any]) -> str:
     signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
+
+    message_type = str(payload.get("message_type") or "").lower()
+    parent_entry_uid = payload.get("parent_entry_uid")
+
+    if message_type == "executed_event" and parent_entry_uid:
+        return str(parent_entry_uid).strip()
 
     candidates = [
         payload.get("setup_id"),
         payload.get("event_uid"),
-        signal.get("setup"),
         signal.get("setup_id"),
         signal.get("event_uid"),
     ]
@@ -1536,43 +1576,108 @@ def build_lifecycle_state(payload: Dict[str, Any], validation_result: Optional[D
 
     if event in {"WATCH", "LONG_WATCH", "SHORT_WATCH"}:
         return "WATCH"
+
     if event in {"ARMED", "LONG_ARMED", "SHORT_ARMED"}:
         return "ARMED"
-    if event in {"LONG_ENTRY", "SHORT_ENTRY", "REAL_LONG_ENTRY", "REAL_SHORT_ENTRY"}:
+
+    if event in {"LONG_INIT_AFTER_ADAPTIVE", "SHORT_INIT_AFTER_ADAPTIVE", "IMP_UP_AFTER_ADAPTIVE", "IMP_DN_AFTER_ADAPTIVE"}:
+        quality = payload.get("quality", {}) if isinstance(payload.get("quality"), dict) else {}
+        return "VALIDATED" if quality.get("quality_approved") is True else "REJECTED"
+
+    if event in {"LONG_ENTRY", "SHORT_ENTRY"}:
         if isinstance(validation_result, dict):
             validation = validation_result.get("validation", {}) if isinstance(validation_result.get("validation"), dict) else {}
             if validation.get("approve") is True:
                 return "VALIDATED"
             return "REJECTED"
         return "ENTRY_PENDING"
-    if event in {"REAL_LONG_ENTRY", "REAL_SHORT_ENTRY", "EXECUTED_ENTRY"}:
+
+    if event in {"REAL_LONG_ENTRY", "REAL_SHORT_ENTRY"}:
         return "OPEN"
-    if event in {"EXECUTED_EXIT"}:
+
+    if event in {"REAL_LONG_EXIT", "REAL_SHORT_EXIT", "EXECUTED_EXIT"}:
         return "CLOSED"
-    if event in {"CANCEL"}:
+
+    if event in {"CANCEL", "LONG_CANCEL", "SHORT_CANCEL"}:
         return "CANCELLED"
 
     return event or "UNKNOWN"
 
 
-async def supabase_insert_alert_event(payload: Dict[str, Any], validation_result: Optional[Dict[str, Any]] = None) -> Optional[str]:
+async def supabase_insert_alert_event(
+    payload: Dict[str, Any],
+    validation_result: Optional[Dict[str, Any]] = None
+) -> Optional[str]:
     if not SUPABASE_ENABLED or supabase is None:
         return None
 
     signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
+    source_obj = payload.get("source", {}) if isinstance(payload.get("source"), dict) else {}
+    quality = payload.get("quality", {}) if isinstance(payload.get("quality"), dict) else {}
+    execution = payload.get("execution", {}) if isinstance(payload.get("execution"), dict) else {}
+
     event_id = extract_event_id(payload)
     setup_id = extract_setup_id(payload)
+
+    symbol = str(
+        signal.get("symbol") or
+        payload.get("symbol") or
+        payload.get("ticker") or
+        "UNKNOWN"
+    ).upper().strip()
+
+    timeframe = str(
+        signal.get("tf") or
+        payload.get("tf") or
+        payload.get("timeframe") or
+        "UNKNOWN"
+    ).strip()
+
+    alert_type = str(
+        signal.get("event") or
+        payload.get("event") or
+        "UNKNOWN"
+    ).upper().strip()
+
+    side = str(
+        signal.get("side") or
+        payload.get("side") or
+        ""
+    ).lower().strip() or None
+
+    strategy_name = (
+        source_obj.get("script") or
+        payload.get("strategy_name")
+    )
 
     row = {
         "event_id": event_id,
         "setup_id": setup_id,
-        "symbol": str(signal.get("symbol") or payload.get("symbol") or payload.get("ticker") or "UNKNOWN").upper().strip(),
-        "timeframe": str(signal.get("tf") or payload.get("tf") or payload.get("timeframe") or "UNKNOWN").strip(),
-        "strategy_name": payload.get("strategy_name"),
-        "alert_type": str(signal.get("event") or payload.get("event") or "UNKNOWN").upper().strip(),
-        "side": str(signal.get("side") or payload.get("side") or "").lower().strip() or None,
-        "source": "tradingview",
+
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "strategy_name": strategy_name,
+        "alert_type": alert_type,
+        "side": side,
+
+        "source": source_obj.get("platform") or "tradingview",
         "status": build_lifecycle_state(payload, validation_result),
+
+        # Nuevos campos schema v2
+        "schema_version": payload.get("schema_version"),
+        "message_type": payload.get("message_type"),
+        "event_uid": payload.get("event_uid"),
+        "parent_entry_uid": payload.get("parent_entry_uid"),
+        "parent_event_uid": payload.get("parent_entry_uid"),
+        "script_name": source_obj.get("script"),
+        "quality_approved": bool(quality.get("quality_approved", False)),
+
+        # Execution info
+        "exit_reason": execution.get("exit_reason"),
+        "tp_hit": execution.get("tp_hit"),
+        "sl_hit": execution.get("sl_hit"),
+
+        # Payloads
         "raw_payload": sanitize_for_json(payload),
         "normalized_payload": build_normalized_payload_for_db(payload),
         "technical_state": build_technical_state_for_db(payload, validation_result),
@@ -1580,28 +1685,44 @@ async def supabase_insert_alert_event(payload: Dict[str, Any], validation_result
     }
 
     try:
-        resp = supabase.table("alert_events").upsert(row, on_conflict="event_id").execute()
+        resp = (
+            supabase
+            .table("alert_events")
+            .upsert(row, on_conflict="event_id")
+            .execute()
+        )
+
         data = resp.data or []
+
         if data and isinstance(data, list):
             inserted_id = data[0].get("id")
+
             log_event("supabase_alert_event_upsert_ok", {
                 "event_id": event_id,
                 "setup_id": setup_id,
-                "db_id": inserted_id
+                "event_uid": payload.get("event_uid"),
+                "parent_entry_uid": payload.get("parent_entry_uid"),
+                "db_id": inserted_id,
+                "alert_type": alert_type,
+                "message_type": payload.get("message_type")
             })
+
             return inserted_id
 
         log_event("supabase_alert_event_upsert_ok", {
             "event_id": event_id,
             "setup_id": setup_id,
+            "event_uid": payload.get("event_uid"),
             "db_id": None
         })
+
         return None
 
     except Exception as e:
         log_event("supabase_alert_event_upsert_error", {
             "event_id": event_id,
             "setup_id": setup_id,
+            "event_uid": payload.get("event_uid"),
             "error": str(e)
         })
         return None
@@ -1712,41 +1833,64 @@ async def persist_to_supabase(
         return
 
     try:
+        if not should_persist_payload(payload):
+            log_trace(trace_id, "supabase_persist_skipped_by_filter", {
+                "script": nested_get(payload, "source", "script"),
+                "message_type": payload.get("message_type"),
+                "event_uid": payload.get("event_uid"),
+                "event": nested_get(payload, "signal", "event"),
+                "quality_approved": nested_get(payload, "quality", "quality_approved"),
+                "parent_entry_uid": payload.get("parent_entry_uid")
+            })
+            return
+
+        setup_id = extract_setup_id(payload)
+        event_id = extract_event_id(payload)
+
         log_trace(trace_id, "supabase_persist_start", {
+            "script": nested_get(payload, "source", "script"),
+            "message_type": payload.get("message_type"),
             "event": nested_get(payload, "signal", "event"),
             "side": nested_get(payload, "signal", "side"),
             "symbol": nested_get(payload, "signal", "symbol"),
-            "setup_id": extract_setup_id(payload),
-            "event_id": extract_event_id(payload)
+            "setup_id": setup_id,
+            "event_id": event_id,
+            "event_uid": payload.get("event_uid"),
+            "parent_entry_uid": payload.get("parent_entry_uid")
         })
 
         alert_event_db_id = await supabase_insert_alert_event(payload, validation_result)
 
         log_trace(trace_id, "supabase_alert_event_done", {
+            "setup_id": setup_id,
+            "event_id": event_id,
             "alert_event_db_id": alert_event_db_id
         })
 
         await supabase_upsert_trade_setup(payload, validation_result, alert_event_db_id)
 
         log_trace(trace_id, "supabase_trade_setup_done", {
-            "setup_id": extract_setup_id(payload)
+            "setup_id": setup_id
         })
 
         await supabase_insert_validation_result(payload, validation_result, alert_event_db_id)
 
         log_trace(trace_id, "supabase_validation_result_done", {
-            "setup_id": extract_setup_id(payload)
+            "setup_id": setup_id
         })
 
         log_trace(trace_id, "supabase_persist_done", {
-            "ok": True
+            "ok": True,
+            "setup_id": setup_id,
+            "event_id": event_id,
+            "alert_event_db_id": alert_event_db_id
         })
 
     except Exception as e:
         log_trace(trace_id, "supabase_persist_error", {
             "error": str(e),
             "traceback": traceback.format_exc()
-        })
+        }, level="ERROR")
 # VALIDATION STEPS
 #validación de evento
 #validación de contexto
