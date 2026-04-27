@@ -1432,11 +1432,7 @@ def should_persist_payload(payload: Dict[str, Any]) -> bool:
         return True
 
     if script == "SETUP_CLASSIFIER_MASTER_v7_3_FULL_API_ALERTS":
-        if message_type == "logical_event_core":
-            return quality.get("quality_approved") is True
-
-        if message_type == "logical_event_extra":
-            return True
+        return message_type == "logical_event_core" and quality.get("quality_approved") is True
 
     return False
 def extract_setup_id(payload: Dict[str, Any]) -> str:
@@ -2725,8 +2721,16 @@ async def get_alerts_supabase(limit: int = 50):
         items = []
         for row in rows:
             normalized = row.get("normalized_payload") or {}
+            normalized = row.get("normalized_payload") or {}
             technical = row.get("technical_state") or {}
             micro = row.get("microstructure_state") or {}
+            raw = row.get("raw_payload") or {}
+            
+            context = raw.get("context", {}) if isinstance(raw.get("context"), dict) else {}
+            movement = raw.get("movement", {}) if isinstance(raw.get("movement"), dict) else {}
+            liquidity = raw.get("liquidity", {}) if isinstance(raw.get("liquidity"), dict) else {}
+            trigger = raw.get("trigger", {}) if isinstance(raw.get("trigger"), dict) else {}
+            htf_context = raw.get("htf_context", {}) if isinstance(raw.get("htf_context"), dict) else {}
 
             items.append({
                 "id": row.get("id"),
@@ -2739,13 +2743,13 @@ async def get_alerts_supabase(limit: int = 50):
                 "side": row.get("side"),
                 "status": row.get("status"),
                 "strategy_name": row.get("strategy_name"),
-                "phase": technical.get("phase"),
-                "regime": technical.get("regime"),
-                "dir_state": technical.get("dir_state"),
-                "mov_state": technical.get("mov_state"),
-                "liq_state": technical.get("liq_state"),
-                "htf_phase": technical.get("htf_phase"),
-                "trigger_alignment": technical.get("trigger_alignment"),
+                "phase": technical.get("phase") or context.get("phase"),
+                "regime": technical.get("regime") or context.get("regime"),
+                "dir_state": technical.get("dir_state") or context.get("dir_state"),
+                "mov_state": technical.get("mov_state") or movement.get("mov_state"),
+                "liq_state": technical.get("liq_state") or liquidity.get("liq_state"),
+                "htf_phase": technical.get("htf_phase") or htf_context.get("htf_phase"),
+                "trigger_alignment": technical.get("trigger_alignment") or trigger.get("trigger_alignment"),
                 "spread_bps": micro.get("spread_bps"),
                 "book_imbalance": micro.get("book_imbalance"),
                 "raw_payload": row.get("raw_payload"),
@@ -2827,9 +2831,15 @@ async def get_setups_supabase(limit: int = 50):
 @app.post("/")
 async def root_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     x_webhook_secret: Optional[str] = Header(default=None)
 ):
-    return await tradingview_webhook(request=request, x_webhook_secret=x_webhook_secret)
+    return await tradingview_webhook(
+        request=request,
+        background_tasks=background_tasks,
+        x_webhook_secret=x_webhook_secret
+    )
+    
 @app.get("/api/health/supabase")
 async def health_supabase():
     if not SUPABASE_ENABLED or supabase is None:
