@@ -433,7 +433,7 @@ def should_validate_payload(payload: Dict[str, Any]) -> bool:
     event = str(signal.get("event") or payload.get("event") or "").upper()
     message_type = str(payload.get("message_type") or "").lower()
 
-    return message_type == "logical_event_core" and event in {
+    return message_type in {"logical_event_core", "logical_event_full"} and event in {
         "LONG_ENTRY",
         "SHORT_ENTRY",
     }
@@ -1432,9 +1432,13 @@ def should_persist_payload(payload: Dict[str, Any]) -> bool:
         return True
 
     if script == "SETUP_CLASSIFIER_MASTER_v7_3_FULL_API_ALERTS":
-        return message_type == "logical_event_core" and quality.get("quality_approved") is True
+        if message_type == "logical_event_full":
+            return quality.get("quality_approved") is True
+
+        return False
 
     return False
+    
 def extract_setup_id(payload: Dict[str, Any]) -> str:
     signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
 
@@ -2437,6 +2441,69 @@ async def validate_payload(
     return JSONResponse(status_code=200, content=safe_result)
 DEBUG_WEBHOOK_ECHO = False
 
+def merge_core_extra_payloads(core: Dict[str, Any], extra: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(core)
+
+    for key in [
+        "adaptive_algoalpha",
+        "movement",
+        "liquidity",
+        "structure",
+        "setup_timing",
+        "setup_validation",
+        "setup_context",
+        "sequence",
+        "htf_context",
+    ]:
+        if isinstance(extra.get(key), dict):
+            merged[key] = extra[key]
+
+    merged["message_type"] = "logical_event_full"
+    merged["assembled_from"] = ["logical_event_core", "logical_event_extra"]
+    merged["extra_received"] = True
+
+    return ensure_canonical_schema(merged)
+
+
+def assemble_core_extra_by_event_uid(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    """
+    Devuelve:
+    - payload ensamblado
+    - True si ya está completo para persistir/procesar
+    """
+    message_type = str(payload.get("message_type") or "").lower()
+    event_uid = str(payload.get("event_uid") or "").strip()
+
+    if not event_uid:
+        return ensure_canonical_schema(payload), True
+
+    if event_uid not in ASSEMBLED_EVENTS:
+        ASSEMBLED_EVENTS[event_uid] = {}
+
+    buffer = ASSEMBLED_EVENTS[event_uid]
+
+    if message_type == "logical_event_core":
+        buffer["core"] = payload
+
+    elif message_type == "logical_event_extra":
+        buffer["extra"] = payload
+
+    else:
+        return ensure_canonical_schema(payload), True
+
+    core = buffer.get("core")
+    extra = buffer.get("extra")
+
+    if core and extra:
+        merged = merge_core_extra_payloads(core, extra)
+        ASSEMBLED_EVENTS.pop(event_uid, None)
+        return merged, True
+
+    partial = ensure_canonical_schema(payload)
+    partial["waiting_for_pair"] = True
+    return partial, False
+    
+
 @app.post("/api/webhook")
 async def tradingview_webhook(
     request: Request,
@@ -2570,7 +2637,9 @@ async def tradingview_webhook(
 
         t0_parse = time.perf_counter()
         payload_raw = parse_payload(raw_body)
-        payload = assemble_event_payload(payload_raw)
+        payload_raw = assemble_event_payload(payload_raw)
+        
+        payload, payload_complete = assemble_core_extra_by_event_uid(payload_raw)
         parse_ms = round((time.perf_counter() - t0_parse) * 1000, 2)
 
         log_trace(trace_id, "payload_parsed", {
@@ -2626,10 +2695,31 @@ async def tradingview_webhook(
             "payload": payload,
             "validation": LAST_VALIDATION,
         })
-
+        
+        if not payload_complete:
+            LAST_ALERT = sanitize_for_json({
+                "ok": True,
+                "received_at": utc_now_iso(),
+                "message": "Partial payload received, waiting for CORE/EXTRA pair",
+                "event_uid": payload.get("event_uid"),
+                "message_type": payload.get("message_type"),
+                "waiting_for_pair": True,
+                "payload": payload,
+            })
+        
+            return JSONResponse(
+                status_code=200,
+                content=sanitize_for_json({
+                    "ok": True,
+                    "message": "Partial payload received. Waiting for matching CORE/EXTRA.",
+                    "event_uid": payload.get("event_uid"),
+                    "message_type": payload.get("message_type"),
+                })
+            )
+        
         history_item = sanitize_for_json(build_history_item(payload, LAST_VALIDATION))
         ALERT_HISTORY.append(history_item)
-
+        
         background_tasks.add_task(process_alert_background, payload, trace_id)
 
         total_ms = round((time.perf_counter() - t0_total) * 1000, 2)
