@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, Header, HTTPException
+from fastapi import FastAPI, Request, Header, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from collections import deque
@@ -2444,109 +2444,35 @@ DEBUG_WEBHOOK_ECHO = False
 @app.post("/api/webhook")
 async def tradingview_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     x_webhook_secret: Optional[str] = Header(default=None)
 ):
     global LAST_ALERT, LAST_VALIDATION, ALERT_HISTORY
 
-    try:
-        t0_total = time.perf_counter()
-        trace_id = make_trace_id()
+    async def process_alert_background(payload: Dict[str, Any], trace_id: str):
+        global LAST_VALIDATION, LAST_ALERT
 
-        log_trace(trace_id, "webhook_received_start", {
-            "path": str(request.url.path),
-            "method": request.method,
-            "query_params": dict(request.query_params),
-            "client": request.client.host if request.client else None
-        })
-
-        # ------------------------------------------------------------
-        # STEP 0 - AUTH
-        # ------------------------------------------------------------
-        validate_secret(x_webhook_secret)
-        log_event("step_0_secret_validated", {
-            "has_secret_header": x_webhook_secret is not None
-        })
-
-        # ------------------------------------------------------------
-        # STEP 1 - RAW BODY
-        # ------------------------------------------------------------
-        raw_body = await request.body()
-        raw_text = raw_body.decode("utf-8", errors="replace")
-
-        log_trace(trace_id, "step_1_raw_received", {
-            "headers": {
-                "content_type": request.headers.get("content-type", ""),
-                "user_agent": request.headers.get("user-agent", "")
-            },
-            "raw_body_text": raw_text
-        })
-
-        # Debug opcional: activar con ?debug=1
-        debug_mode = str(request.query_params.get("debug", "0")).lower() in {"1", "true", "yes"}
-        if debug_mode:
-            debug_response = sanitize_for_json({
-                "ok": True,
-                "message": "Webhook debug echo",
-                "received_at": utc_now_iso(),
-                "raw_body_text": raw_text
-            })
-            log_event("step_debug_echo_return", debug_response)
-            return JSONResponse(status_code=200, content=debug_response)
-
-        # ------------------------------------------------------------
-        # STEP 2 - PARSE + ASSEMBLE
-        # ------------------------------------------------------------
-        t0_parse = time.perf_counter()
-        payload_raw = parse_payload(raw_body)
-        payload = assemble_event_payload(payload_raw)
-        parse_ms = round((time.perf_counter() - t0_parse) * 1000, 2)
-
-        log_event("metric_parse_time", {"ms": parse_ms})
-
-        log_event("step_2_payload_parsed", {
-            "payload_raw": payload_raw,
-            "payload_assembled": payload
-        })
-
-        log_data = build_log(
-            route="/api/webhook",
-            payload=payload,
-            headers={
-                "content_type": request.headers.get("content-type", ""),
-                "user_agent": request.headers.get("user-agent", ""),
-            },
-        )
-        log_event("step_2_build_log", log_data)
-
-        # ------------------------------------------------------------
-        # STEP 3 - VALIDATION
-        # ------------------------------------------------------------
         validation_result = None
 
         try:
             t0_validation = time.perf_counter()
 
             if should_validate_payload(payload):
-                log_event("step_3_validation_start", {
-                    "should_validate": True,
+                log_trace(trace_id, "bg_validation_start", {
                     "message_type": payload.get("message_type"),
                     "event_uid": payload.get("event_uid"),
                     "event": nested_get(payload, "signal", "event"),
                     "side": nested_get(payload, "signal", "side"),
                     "symbol": nested_get(payload, "signal", "symbol")
                 })
+
                 validation_result = await run_validation(payload)
+
             else:
-                log_event("step_3_validation_skipped", {
-                    "should_validate": False,
-                    "message_type": payload.get("message_type"),
-                    "event_uid": payload.get("event_uid"),
-                    "event": nested_get(payload, "signal", "event")
-                })
                 validation_result = {
                     "ok": True,
                     "validated_at": utc_now_iso(),
-                    "message": "Validation deferred or skipped for this partial/non-entry payload",
+                    "message": "Validation skipped for non-entry event",
                     "validation": {
                         "approve": False,
                         "confidence": 0,
@@ -2559,9 +2485,13 @@ async def tradingview_webhook(
                 }
 
             validation_ms = round((time.perf_counter() - t0_validation) * 1000, 2)
-            log_event("metric_validation_time", {"ms": validation_ms})
+            log_trace(trace_id, "bg_validation_done", {
+                "ms": validation_ms,
+                "validation_result": validation_result
+            })
 
             LAST_VALIDATION = sanitize_for_json(validation_result)
+
             validation_block = LAST_VALIDATION.get("validation", {}) if isinstance(LAST_VALIDATION, dict) else {}
 
             if validation_block.get("approve") is True:
@@ -2573,39 +2503,115 @@ async def tradingview_webhook(
                     "approve": validation_block.get("approve"),
                     "confidence": validation_block.get("confidence")
                 })
-            log_event("step_3_validation_done", {
-                "validation_result": LAST_VALIDATION
-            })
 
         except Exception as e:
             validation_result = {
                 "ok": False,
                 "validated_at": utc_now_iso(),
-                "message": "Validation failed",
+                "message": "Validation failed in background",
                 "error": str(e)
             }
 
             LAST_VALIDATION = sanitize_for_json(validation_result)
 
-            log_event("step_3_validation_error", {
+            log_trace(trace_id, "bg_validation_error", {
                 "error": str(e),
-                "traceback": traceback.format_exc(),
-                "payload": payload,
-                "validation_result": LAST_VALIDATION
+                "traceback": traceback.format_exc()
             })
 
-        # ------------------------------------------------------------
-        # STEP 4 - BUILD LAST_ALERT
-        # ------------------------------------------------------------
+        try:
+            t0_supabase = time.perf_counter()
+            await persist_to_supabase(payload, LAST_VALIDATION, trace_id=trace_id)
+            supabase_ms = round((time.perf_counter() - t0_supabase) * 1000, 2)
+
+            log_trace(trace_id, "bg_supabase_persist_done", {
+                "ms": supabase_ms
+            })
+
+        except Exception as e:
+            log_trace(trace_id, "bg_supabase_persist_error", {
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            })
+
+        try:
+            if isinstance(LAST_ALERT, dict):
+                LAST_ALERT["validation"] = LAST_VALIDATION
+                LAST_ALERT["background_processed_at"] = utc_now_iso()
+
+        except Exception as e:
+            log_trace(trace_id, "bg_last_alert_update_error", {
+                "error": str(e)
+            })
+
+    try:
+        t0_total = time.perf_counter()
+        trace_id = make_trace_id()
+
+        log_trace(trace_id, "webhook_received_start", {
+            "path": str(request.url.path),
+            "method": request.method,
+            "query_params": dict(request.query_params),
+            "client": request.client.host if request.client else None
+        })
+
+        validate_secret(x_webhook_secret)
+
+        raw_body = await request.body()
+        raw_text = raw_body.decode("utf-8", errors="replace")
+
+        debug_mode = str(request.query_params.get("debug", "0")).lower() in {"1", "true", "yes"}
+        if debug_mode:
+            return JSONResponse(
+                status_code=200,
+                content=sanitize_for_json({
+                    "ok": True,
+                    "message": "Webhook debug echo",
+                    "received_at": utc_now_iso(),
+                    "raw_body_text": raw_text
+                })
+            )
+
+        t0_parse = time.perf_counter()
+        payload_raw = parse_payload(raw_body)
+        payload = assemble_event_payload(payload_raw)
+        parse_ms = round((time.perf_counter() - t0_parse) * 1000, 2)
+
+        log_trace(trace_id, "payload_parsed", {
+            "parse_ms": parse_ms,
+            "message_type": payload.get("message_type"),
+            "event_uid": payload.get("event_uid"),
+            "event": nested_get(payload, "signal", "event"),
+            "side": nested_get(payload, "signal", "side"),
+            "symbol": nested_get(payload, "signal", "symbol")
+        })
+
         signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
         context = payload.get("context", {}) if isinstance(payload.get("context"), dict) else {}
         quality = payload.get("quality", {}) if isinstance(payload.get("quality"), dict) else {}
         htf_context = payload.get("htf_context", {}) if isinstance(payload.get("htf_context"), dict) else {}
 
+        LAST_VALIDATION = sanitize_for_json({
+            "ok": True,
+            "validated_at": utc_now_iso(),
+            "message": "Validation queued in background",
+            "validation": {
+                "approve": False,
+                "confidence": 0,
+                "probability_tp_before_sl": None,
+                "score_external": None,
+                "reason": ["validation_queued_background"],
+                "penalties": [],
+                "event_type": signal.get("event") or payload.get("event")
+            }
+        })
+
         LAST_ALERT = sanitize_for_json({
             "ok": True,
             "received_at": utc_now_iso(),
             "route": "/api/webhook",
+            "processing_mode": "fast_ack_background",
+            "trace_id": trace_id,
             "schema_version": payload.get("schema_version"),
             "message_type": payload.get("message_type"),
             "event_uid": payload.get("event_uid"),
@@ -2625,49 +2631,28 @@ async def tradingview_webhook(
             "validation": LAST_VALIDATION,
         })
 
-        log_event("step_4_last_alert_updated", LAST_ALERT)
-
-        # ------------------------------------------------------------
-        # STEP 5 - HISTORY
-        # ------------------------------------------------------------
         history_item = sanitize_for_json(build_history_item(payload, LAST_VALIDATION))
         ALERT_HISTORY.append(history_item)
 
-        log_event("step_5_history_appended", {
-            "history_size": len(ALERT_HISTORY),
-            "history_item": history_item
-        })
-        # ------------------------------------------------------------
-        # STEP 5B - PERSIST SUPABASE
-        # ------------------------------------------------------------
-        try:
-            t0_supabase = time.perf_counter()
-            await persist_to_supabase(payload, LAST_VALIDATION, trace_id=trace_id)
-            supabase_ms = round((time.perf_counter() - t0_supabase) * 1000, 2)
-            log_event("metric_supabase_persist_time", {"ms": supabase_ms})
-        except Exception as e:
-            log_event("step_5b_supabase_persist_error", {
-                "error": str(e),
-                "traceback": traceback.format_exc()
-            })
-        # ------------------------------------------------------------
-        # STEP 6 - RESPONSE
-        # ------------------------------------------------------------
+        background_tasks.add_task(process_alert_background, payload, trace_id)
+
         total_ms = round((time.perf_counter() - t0_total) * 1000, 2)
-        log_event("metric_total_processing_time", {"ms": total_ms})
 
         response_content = sanitize_for_json({
             "ok": True,
-            "message": "Alert received and processed",
-            "data": LAST_ALERT,
+            "message": "Alert received quickly. Validation, Supabase and Telegram queued in background.",
+            "trace_id": trace_id,
+            "processing_ms": total_ms,
+            "event_uid": payload.get("event_uid"),
+            "message_type": payload.get("message_type"),
+            "event": signal.get("event") or payload.get("event"),
+            "side": signal.get("side") or payload.get("side"),
+            "symbol": signal.get("symbol") or payload.get("symbol") or payload.get("ticker")
         })
 
-        log_event("step_6_response_sent", response_content)
+        log_trace(trace_id, "webhook_fast_response_sent", response_content)
 
-        return JSONResponse(
-            status_code=200,
-            content=response_content,
-        )
+        return JSONResponse(status_code=200, content=response_content)
 
     except HTTPException as e:
         log_event("webhook_http_exception", {
@@ -2691,10 +2676,9 @@ async def tradingview_webhook(
             "response": error_response
         })
 
-        return JSONResponse(
-            status_code=500,
-            content=error_response
-        )
+        return JSONResponse(status_code=500, content=error_response)
+
+
 @app.get("/api/alerts/supabase")
 async def get_alerts_supabase(limit: int = 50):
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
