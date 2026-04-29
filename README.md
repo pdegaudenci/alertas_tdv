@@ -511,7 +511,228 @@ El backend no debe recalcular toda la lógica de Pine Script. Su responsabilidad
 
 ---
 
-## 7. Capas de la aplicación
+## 7. Tres niveles / módulos de validación
+
+La validación se organiza en **tres niveles principales**. Cada nivel tiene una responsabilidad distinta y se ejecuta dentro de la Validation Layer.
+
+```text
+Nivel 1: Validación del payload y del evento
+Nivel 2: Validación técnica con información de Pine Script
+Nivel 3: Validación externa con mercado real, score y probabilidad TP/SL
+```
+
+---
+
+### 7.1 Nivel 1 — Validación del payload y del evento
+
+Este nivel verifica que la alerta recibida sea procesable.
+
+Responsabilidades:
+
+```text
+- Validar el webhook secret
+- Parsear el body recibido
+- Verificar que sea JSON válido
+- Normalizar estructura base
+- Identificar message_type
+- Identificar event_uid
+- Identificar signal.event
+- Identificar signal.side
+- Identificar symbol y timeframe
+- Fusionar logical_event_core + logical_event_extra si aplica
+- Decidir si el evento debe validarse completamente o solo persistirse
+```
+
+Eventos que pasan a validación completa:
+
+```text
+LONG_ENTRY
+SHORT_ENTRY
+REAL_LONG_ENTRY
+REAL_SHORT_ENTRY
+```
+
+Eventos que se reciben y se pueden persistir, pero no ejecutan validación completa:
+
+```text
+LONG_INIT
+SHORT_INIT
+IMP_UP_AFTER_ADAPTIVE
+IMP_DN_AFTER_ADAPTIVE
+LONG_WATCH
+SHORT_WATCH
+LONG_ARMED
+SHORT_ARMED
+LONG_CANCEL
+SHORT_CANCEL
+```
+
+Módulos relacionados:
+
+```text
+app.core.security
+app.services.alert_service
+app.api.routes
+```
+
+Funciones relacionadas:
+
+```text
+validate_secret()
+parse_payload()
+ensure_canonical_schema()
+assemble_event_payload()
+assemble_core_extra_by_event_uid()
+should_validate_payload()
+```
+
+---
+
+### 7.2 Nivel 2 — Validación técnica con datos de Pine Script
+
+Este nivel reutiliza la información técnica que ya fue calculada por TradingView.
+
+Responsabilidades:
+
+```text
+- Evaluar quality_score_alert
+- Evaluar quality_class_alert
+- Evaluar quality_approved_alert
+- Evaluar trigger_long / trigger_short
+- Evaluar ast_bull / ast_bear
+- Evaluar hull_bull / hull_bear
+- Evaluar aa_color del Adaptive SuperTrend
+- Evaluar fase y régimen
+- Evaluar HTF context
+- Evaluar liquidez enviada por Pine
+- Evaluar flags de extensión o late trend
+- Evaluar setup_validation y setup_context
+```
+
+Datos reutilizados desde la alerta:
+
+```text
+context
+trigger
+quality
+movement
+liquidity
+structure
+setup_timing
+setup_validation
+setup_context
+sequence
+htf_context
+trade_plan
+execution
+```
+
+Módulos relacionados:
+
+```text
+app.services.alert_service
+app.services.scoring_service
+app.services.validation_service
+```
+
+Funciones relacionadas:
+
+```text
+normalize_alert()
+compute_external_scores()
+run_validation()
+```
+
+---
+
+### 7.3 Nivel 3 — Validación externa con mercado real, score y probabilidad TP/SL
+
+Este nivel enriquece la alerta con datos externos actuales desde Binance.
+
+Responsabilidades:
+
+```text
+- Descargar klines 1m
+- Descargar klines 5m
+- Descargar order book
+- Descargar aggTrades
+- Calcular indicadores backend
+- Calcular estructura / swings
+- Analizar spread
+- Analizar book imbalance
+- Analizar buy/sell aggression
+- Analizar delta_qty
+- Analizar bid/ask walls
+- Analizar vacuum above/below
+- Calcular score_external
+- Calcular probability_tp_before_sl
+- Generar validation_steps
+- Aprobar o rechazar entrada
+```
+
+Datos externos usados:
+
+```text
+Binance 1m klines
+Binance 5m klines
+Binance depth
+Binance aggTrades
+```
+
+Indicadores calculados en backend:
+
+```text
+EMA20
+EMA50
+EMA200
+ATR14
+ADX
++DI
+-DI
+VWAP
+RVOL20
+Body %
+Wicks
+Returns
+Impulse ATR
+Compression ratio
+Swing high / swing low
+Order book imbalance
+Spread bps
+Bid wall
+Ask wall
+Vacuum above / below
+Buy aggression
+Sell aggression
+Delta qty
+```
+
+Módulos relacionados:
+
+```text
+app.services.binance_service
+app.services.market_features_service
+app.services.scoring_service
+app.services.probability_service
+app.services.validation_service
+```
+
+Funciones relacionadas:
+
+```text
+collect_market_data()
+compute_candle_features()
+detect_swings()
+analyze_order_book()
+analyze_agg_trades()
+compute_external_scores()
+estimate_tp_before_sl_probability()
+run_validation()
+```
+
+---
+
+## 8. Capas de la aplicación
 
 La aplicación quedó dividida en capas siguiendo un patrón modular.
 
@@ -526,7 +747,7 @@ External Integrations
 
 ---
 
-## 8. Patrón aplicado en la refactorización
+## 9. Patrón aplicado en la refactorización
 
 El patrón aplicado es:
 
@@ -578,7 +799,7 @@ backend/
 
 ---
 
-## 9. Objetivo de la refactorización
+## 10. Objetivo de la refactorización
 
 La refactorización tuvo como objetivo dividir un archivo monolítico `index.py` de más de 2000 líneas en módulos mantenibles.
 
@@ -599,7 +820,7 @@ La refactorización tuvo como objetivo dividir un archivo monolítico `index.py`
 
 ---
 
-## 10. Fases de la refactorización
+## 11. Fases de la refactorización
 
 ### Fase 1 — Core y utilidades base
 
@@ -808,7 +1029,7 @@ Responsabilidad:
 
 ---
 
-## 11. Estructura final del proyecto
+## 12. Estructura final del proyecto
 
 ```text
 backend/
@@ -857,9 +1078,9 @@ backend/
 
 ---
 
-## 12. Función de cada capa
+## 13. Función de cada capa
 
-### 12.1 API Layer
+### 13.1 API Layer
 
 Ubicación:
 
@@ -894,7 +1115,7 @@ POST /
 
 ---
 
-### 12.2 Core Layer
+### 13.2 Core Layer
 
 Ubicación:
 
@@ -922,7 +1143,7 @@ security.py
 
 ---
 
-### 12.3 Service Layer
+### 13.3 Service Layer
 
 Ubicación:
 
@@ -956,7 +1177,7 @@ telegram_service.py
 
 ---
 
-### 12.4 Repository Layer
+### 13.4 Repository Layer
 
 Ubicación:
 
@@ -981,7 +1202,7 @@ supabase_repo.py
 
 ---
 
-### 12.5 Utils Layer
+### 13.5 Utils Layer
 
 Ubicación:
 
@@ -1009,7 +1230,7 @@ math_utils.py
 
 ---
 
-## 13. Validation Layer
+## 14. Validation Layer
 
 La Validation Layer es la parte central del backend.
 
@@ -1032,7 +1253,7 @@ Su función es decidir si una entrada enviada por TradingView merece ser aprobad
 
 ---
 
-## 14. Eventos que se validan completamente
+## 15. Eventos que se validan completamente
 
 Actualmente la validación completa se ejecuta para:
 
@@ -1058,7 +1279,7 @@ Esto es intencional porque INIT representa señal temprana o potencial, no entra
 
 ---
 
-## 15. Persistencia de INIT
+## 16. Persistencia de INIT
 
 La persistencia fue ajustada para no perder INIT.
 
@@ -1087,7 +1308,7 @@ Esto permite construir dataset histórico aunque la señal no esté aprobada.
 
 ---
 
-## 16. Lifecycle de eventos
+## 17. Lifecycle de eventos
 
 El backend asigna un estado lógico a cada evento.
 
@@ -1105,7 +1326,7 @@ CANCELLED      → setup cancelado
 
 ---
 
-## 17. Flujo del dato completo
+## 18. Flujo del dato completo
 
 ### Paso 1 — Pine Script detecta señal
 
@@ -1455,7 +1676,7 @@ penalizaciones
 
 ---
 
-## 18. Endpoints disponibles
+## 19. Endpoints disponibles
 
 ### Health principal
 
@@ -1539,16 +1760,182 @@ Lee setups guardados en Supabase.
 
 ---
 
-## 19. Variables de entorno
+## 20. Variables de entorno
+
+Crear estas variables tanto en local como en Vercel.
+
+### 20.1 Seguridad del webhook
+
+```env
+WEBHOOK_SECRET=MI_SECRET
+```
+
+Uso:
 
 ```text
-WEBHOOK_SECRET=
+- Valida el header x-webhook-secret enviado al backend
+- Si está vacío, no se aplica validación por header
+- Recomendado configurarlo siempre en producción
+```
+
+Header esperado:
+
+```http
+x-webhook-secret: MI_SECRET
+```
+
+---
+
+### 20.2 Validación
+
+```env
 VALIDATION_THRESHOLD=0.62
 MIN_SCORE_THRESHOLD=55
 REQUEST_TIMEOUT_SEC=8.0
+VALIDATION_MODEL_VERSION=rules_v1
+```
 
-SUPABASE_URL=
-SUPABASE_SERVICE_ROLE_KEY=
+Uso:
+
+```text
+VALIDATION_THRESHOLD:
+- Umbral mínimo de probability_tp_before_sl para aprobar una entrada
+
+MIN_SCORE_THRESHOLD:
+- Score externo mínimo requerido para aprobar una entrada
+
+REQUEST_TIMEOUT_SEC:
+- Timeout para requests HTTP hacia Binance
+
+VALIDATION_MODEL_VERSION:
+- Versión lógica del modelo/reglas guardada en validation_results
+```
+
+---
+
+### 20.3 Supabase
+
+```env
+SUPABASE_URL=https://xxxxx.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=xxxxx
+```
+
+Uso:
+
+```text
+SUPABASE_URL:
+- URL del proyecto Supabase
+
+SUPABASE_SERVICE_ROLE_KEY:
+- Key con permisos para insertar/upsert/leer tablas
+- No usar anon key para persistencia backend
+```
+
+Tablas usadas:
+
+```text
+alert_events
+trade_setups
+validation_results
+```
+
+---
+
+### 20.4 Telegram
+
+```env
+TELEGRAM_ENABLED=false
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+```
+
+Uso:
+
+```text
+TELEGRAM_ENABLED:
+- true para activar notificaciones
+- false para desactivarlas
+
+TELEGRAM_BOT_TOKEN:
+- Token del bot creado con BotFather
+
+TELEGRAM_CHAT_ID:
+- Chat o grupo donde se enviarán las señales aprobadas
+```
+
+El mensaje se envía solo si:
+
+```text
+validation.approve == true
+```
+
+---
+
+### 20.5 Machine Learning opcional
+
+```env
+ML_MODEL_PATH=
+ML_FEATURES_JSON=
+```
+
+Uso:
+
+```text
+ML_MODEL_PATH:
+- Ruta local o del entorno al modelo sklearn/joblib
+
+ML_FEATURES_JSON:
+- JSON con el orden de features esperado por el modelo
+```
+
+Si no están configuradas, la API funciona igual usando:
+
+```text
+hybrid_barrier_logit
+```
+
+Si están configuradas correctamente, puede usar:
+
+```text
+hybrid_barrier_logit_sklearn
+```
+
+---
+
+### 20.6 CORS
+
+```env
+ALLOWED_ORIGINS=*
+```
+
+Uso:
+
+```text
+- Permite definir qué frontends pueden consumir la API
+- Para desarrollo puede usarse *
+- Para producción conviene restringirlo al dominio del dashboard
+```
+
+Ejemplo producción:
+
+```env
+ALLOWED_ORIGINS=https://mi-dashboard.vercel.app,https://mi-streamlit-app.streamlit.app
+```
+
+---
+
+### 20.7 Ejemplo `.env` local
+
+```env
+WEBHOOK_SECRET=MI_SECRET
+
+VALIDATION_THRESHOLD=0.62
+MIN_SCORE_THRESHOLD=55
+REQUEST_TIMEOUT_SEC=8.0
+VALIDATION_MODEL_VERSION=rules_v1
+
+SUPABASE_URL=https://xxxxx.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=xxxxx
 
 TELEGRAM_ENABLED=false
 TELEGRAM_BOT_TOKEN=
@@ -1558,12 +1945,60 @@ ML_MODEL_PATH=
 ML_FEATURES_JSON=
 
 ALLOWED_ORIGINS=*
-VALIDATION_MODEL_VERSION=rules_v1
 ```
 
 ---
 
-## 20. Compatibilidad con Vercel
+### 20.8 Variables a crear en Vercel
+
+En Vercel:
+
+```text
+Project Settings
+        ↓
+Environment Variables
+        ↓
+Add
+```
+
+Crear:
+
+```text
+WEBHOOK_SECRET
+VALIDATION_THRESHOLD
+MIN_SCORE_THRESHOLD
+REQUEST_TIMEOUT_SEC
+VALIDATION_MODEL_VERSION
+SUPABASE_URL
+SUPABASE_SERVICE_ROLE_KEY
+TELEGRAM_ENABLED
+TELEGRAM_BOT_TOKEN
+TELEGRAM_CHAT_ID
+ML_MODEL_PATH
+ML_FEATURES_JSON
+ALLOWED_ORIGINS
+```
+
+Mínimas obligatorias para operar con Supabase:
+
+```text
+WEBHOOK_SECRET
+SUPABASE_URL
+SUPABASE_SERVICE_ROLE_KEY
+```
+
+Mínimas para validar sin Supabase:
+
+```text
+WEBHOOK_SECRET
+VALIDATION_THRESHOLD
+MIN_SCORE_THRESHOLD
+REQUEST_TIMEOUT_SEC
+```
+
+---
+
+## 21. Compatibilidad con Vercel
 
 La app está preparada para Vercel con:
 
@@ -1600,7 +2035,7 @@ from app.main import app
 
 ---
 
-## 21. Ejecución local
+## 22. Ejecución local
 
 Desde la carpeta `backend`:
 
@@ -1617,7 +2052,7 @@ http://127.0.0.1:8000/
 
 ---
 
-## 22. Pruebas básicas
+## 23. Pruebas básicas
 
 ```bash
 curl http://127.0.0.1:8000/
@@ -1629,7 +2064,7 @@ curl http://127.0.0.1:8000/api/health/supabase
 
 ---
 
-## 23. Estado final de la refactorización
+## 24. Estado final de la refactorización
 
 La refactorización separó un backend monolítico en una arquitectura modular basada en capas.
 
@@ -1653,7 +2088,7 @@ La refactorización separó un backend monolítico en una arquitectura modular b
 
 ---
 
-## 24. Commit representativo
+## 25. Commit representativo
 
 ```bash
 git add .
@@ -1662,7 +2097,7 @@ git commit -m "refactor trading validation backend into modular services" -m "Sp
 
 ---
 
-## 25. Resumen ejecutivo
+## 26. Resumen ejecutivo
 
 Esta API es la capa de validación y persistencia del sistema de trading algorítmico.
 
@@ -1696,6 +2131,14 @@ con capas auxiliares:
 Core Layer
 Utils Layer
 External Integrations
+```
+
+La validación queda organizada en tres niveles:
+
+```text
+Nivel 1: Validación del payload y evento
+Nivel 2: Validación técnica con datos de Pine Script
+Nivel 3: Validación externa con mercado real, score y probabilidad TP/SL
 ```
 
 Esta estructura permite continuar el desarrollo agregando dashboard, ML, LLM explanation, métricas de performance y automatización sin seguir creciendo sobre un único `index.py` monolítico.
