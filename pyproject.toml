@@ -1,0 +1,7 @@
+[project]
+name = "tradingview-validation-layer"
+version = "1.0.0"
+requires-python = ">=3.12,<3.14"
+
+[project.scripts]
+app = "api.index:app"
