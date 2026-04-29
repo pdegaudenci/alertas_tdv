@@ -13,7 +13,6 @@ Endpoints:
 - /api/alerts/supabase
 - /api/setups/supabase
 
-
 """
 
 from typing import Optional, Dict, Any
@@ -23,45 +22,40 @@ import traceback
 from fastapi import APIRouter, Request, Header, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 
-from app.state.memory import LAST_ALERT, LAST_VALIDATION, ALERT_HISTORY
-from app.utils.serialization import utc_now_iso, sanitize_for_json
-from app.core.config import (
-    BINANCE_BASE_URLS,
-    SUPABASE_ENABLED,
-    supabase,
-)
-from app.core.logger import log_event, log_trace, make_trace_id
-from app.services.alert_schema_service import (
+from app.core.state import LAST_ALERT, LAST_VALIDATION, ALERT_HISTORY
+from app.core.config import BINANCE_BASE_URLS, SKLEARN_MODEL, ALLOWED_ORIGINS
+from app.core.security import validate_secret
+from app.core.logging import log_event, log_trace, make_trace_id
+
+from app.utils.time_utils import utc_now_iso
+from app.utils.json_utils import sanitize_for_json
+from app.utils.math_utils import nested_get
+
+from app.services.alert_service import (
     parse_payload,
-    validate_secret,
     assemble_event_payload,
     should_validate_payload,
-    nested_get,
+    assemble_core_extra_by_event_uid,
+    build_history_item,
 )
+
 from app.services.validation_service import run_validation
-from app.services.market_data_service import fetch_depth
-from app.services.supabase_service import (
-    persist_to_supabase,
-)
+from app.services.binance_service import fetch_depth
 from app.services.telegram_service import (
     send_telegram_message,
     build_telegram_entry_message,
 )
-from app.services.assembler_service import (
-    assemble_core_extra_by_event_uid,
-)
-from app.services.history_service import build_history_item
-from app.services.supabase_read_service import (
+
+from app.repositories.supabase_repo import (
+    SUPABASE_RUNTIME_ENABLED,
+    supabase,
+    persist_to_supabase,
     get_alerts_supabase_service,
     get_setups_supabase_service,
 )
 
 router = APIRouter()
 
-
-# ============================================================
-# ROOT
-# ============================================================
 
 @router.get("/")
 async def healthcheck():
@@ -77,12 +71,10 @@ async def healthcheck():
             "/api/health/binance",
         ],
         "binance_base_urls": BINANCE_BASE_URLS,
+        "model_loaded": SKLEARN_MODEL is not None,
+        "allowed_origins": ALLOWED_ORIGINS,
     }
 
-
-# ============================================================
-# MEMORY STATE
-# ============================================================
 
 @router.get("/api/latest")
 async def latest_alert():
@@ -105,10 +97,6 @@ async def get_alerts(limit: int = 50):
         "items": items,
     }
 
-
-# ============================================================
-# HEALTH
-# ============================================================
 
 @router.get("/api/health/binance")
 async def health_binance():
@@ -135,7 +123,7 @@ async def health_binance():
 
 @router.get("/api/health/supabase")
 async def health_supabase():
-    if not SUPABASE_ENABLED or supabase is None:
+    if not SUPABASE_RUNTIME_ENABLED or supabase is None:
         return {
             "ok": False,
             "enabled": False,
@@ -164,10 +152,6 @@ async def health_supabase():
         )
 
 
-# ============================================================
-# MANUAL VALIDATE
-# ============================================================
-
 @router.post("/api/validate")
 async def validate_payload(
     request: Request,
@@ -192,29 +176,29 @@ async def validate_payload(
     return JSONResponse(status_code=200, content=safe_result)
 
 
-# ============================================================
-# WEBHOOK
-# ============================================================
-
 @router.post("/api/webhook")
 async def tradingview_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
     x_webhook_secret: Optional[str] = Header(default=None),
 ):
-    global LAST_ALERT, LAST_VALIDATION
-
     async def process_alert_background(payload: Dict[str, Any], trace_id: str):
-        global LAST_ALERT, LAST_VALIDATION
-
         validation_result = None
 
-        # ----------------------------------------------------
-        # VALIDATION
-        # ----------------------------------------------------
         try:
+            t0_validation = time.perf_counter()
+
             if should_validate_payload(payload):
+                log_trace(trace_id, "bg_validation_start", {
+                    "message_type": payload.get("message_type"),
+                    "event_uid": payload.get("event_uid"),
+                    "event": nested_get(payload, "signal", "event"),
+                    "side": nested_get(payload, "signal", "side"),
+                    "symbol": nested_get(payload, "signal", "symbol"),
+                })
+
                 validation_result = await run_validation(payload)
+
             else:
                 validation_result = {
                     "ok": True,
@@ -225,202 +209,238 @@ async def tradingview_webhook(
                         "confidence": 0,
                         "probability_tp_before_sl": None,
                         "score_external": None,
-                        "reason": [
-                            f"validation_skipped_for_message_type:{payload.get('message_type')}"
-                        ],
+                        "reason": [f"validation_skipped_for_message_type:{payload.get('message_type')}"],
                         "penalties": [],
                         "event_type": nested_get(payload, "signal", "event"),
                     },
                 }
 
+            validation_ms = round((time.perf_counter() - t0_validation) * 1000, 2)
+
+            log_trace(trace_id, "bg_validation_done", {
+                "ms": validation_ms,
+                "validation_result": validation_result,
+            })
+
             LAST_VALIDATION.clear()
             LAST_VALIDATION.update(sanitize_for_json(validation_result))
 
-            validation_block = LAST_VALIDATION.get("validation", {})
+            validation_block = LAST_VALIDATION.get("validation", {}) if isinstance(LAST_VALIDATION, dict) else {}
 
             if validation_block.get("approve") is True:
                 telegram_text = build_telegram_entry_message(LAST_VALIDATION)
                 send_telegram_message(telegram_text, trace_id=trace_id)
+            else:
+                log_trace(trace_id, "telegram_not_sent", {
+                    "reason": "entry_not_approved",
+                    "approve": validation_block.get("approve"),
+                    "confidence": validation_block.get("confidence"),
+                })
 
         except Exception as e:
+            validation_result = {
+                "ok": False,
+                "validated_at": utc_now_iso(),
+                "message": "Validation failed in background",
+                "error": str(e),
+            }
+
             LAST_VALIDATION.clear()
-            LAST_VALIDATION.update(
-                sanitize_for_json(
-                    {
-                        "ok": False,
-                        "validated_at": utc_now_iso(),
-                        "message": "Validation failed in background",
-                        "error": str(e),
-                    }
-                )
-            )
+            LAST_VALIDATION.update(sanitize_for_json(validation_result))
 
-            log_trace(
-                trace_id,
-                "bg_validation_error",
-                {
-                    "error": str(e),
-                    "traceback": traceback.format_exc(),
-                },
-                level="ERROR",
-            )
+            log_trace(trace_id, "bg_validation_error", {
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+            }, level="ERROR")
 
-        # ----------------------------------------------------
-        # SUPABASE
-        # ----------------------------------------------------
         try:
+            t0_supabase = time.perf_counter()
             await persist_to_supabase(payload, LAST_VALIDATION, trace_id=trace_id)
+            supabase_ms = round((time.perf_counter() - t0_supabase) * 1000, 2)
+
+            log_trace(trace_id, "bg_supabase_persist_done", {
+                "ms": supabase_ms,
+            })
 
         except Exception as e:
-            log_trace(
-                trace_id,
-                "bg_supabase_error",
-                {
-                    "error": str(e),
-                    "traceback": traceback.format_exc(),
-                },
-                level="ERROR",
-            )
+            log_trace(trace_id, "bg_supabase_persist_error", {
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+            }, level="ERROR")
 
-        # ----------------------------------------------------
-        # UPDATE LAST ALERT
-        # ----------------------------------------------------
         try:
-            LAST_ALERT["validation"] = LAST_VALIDATION
-            LAST_ALERT["background_processed_at"] = utc_now_iso()
+            if isinstance(LAST_ALERT, dict):
+                LAST_ALERT["validation"] = LAST_VALIDATION
+                LAST_ALERT["background_processed_at"] = utc_now_iso()
 
-        except Exception:
-            pass
+        except Exception as e:
+            log_trace(trace_id, "bg_last_alert_update_error", {
+                "error": str(e),
+            })
 
-    # ========================================================
-    # MAIN REQUEST
-    # ========================================================
     try:
         t0_total = time.perf_counter()
         trace_id = make_trace_id()
 
+        log_trace(trace_id, "webhook_received_start", {
+            "path": str(request.url.path),
+            "method": request.method,
+            "query_params": dict(request.query_params),
+            "client": request.client.host if request.client else None,
+        })
+
         validate_secret(x_webhook_secret)
 
         raw_body = await request.body()
+        raw_text = raw_body.decode("utf-8", errors="replace")
+
+        debug_mode = str(request.query_params.get("debug", "0")).lower() in {"1", "true", "yes"}
+
+        if debug_mode:
+            return JSONResponse(
+                status_code=200,
+                content=sanitize_for_json({
+                    "ok": True,
+                    "message": "Webhook debug echo",
+                    "received_at": utc_now_iso(),
+                    "raw_body_text": raw_text,
+                }),
+            )
+
+        t0_parse = time.perf_counter()
+
         payload_raw = parse_payload(raw_body)
         payload_raw = assemble_event_payload(payload_raw)
 
         payload, payload_complete = assemble_core_extra_by_event_uid(payload_raw)
+
+        parse_ms = round((time.perf_counter() - t0_parse) * 1000, 2)
+
+        log_trace(trace_id, "payload_parsed", {
+            "parse_ms": parse_ms,
+            "message_type": payload.get("message_type"),
+            "event_uid": payload.get("event_uid"),
+            "event": nested_get(payload, "signal", "event"),
+            "side": nested_get(payload, "signal", "side"),
+            "symbol": nested_get(payload, "signal", "symbol"),
+        })
 
         signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
         context = payload.get("context", {}) if isinstance(payload.get("context"), dict) else {}
         quality = payload.get("quality", {}) if isinstance(payload.get("quality"), dict) else {}
         htf_context = payload.get("htf_context", {}) if isinstance(payload.get("htf_context"), dict) else {}
 
-        # Placeholder validation
         LAST_VALIDATION.clear()
-        LAST_VALIDATION.update(
-            sanitize_for_json(
-                {
-                    "ok": True,
-                    "validated_at": utc_now_iso(),
-                    "message": "Validation queued in background",
-                    "validation": {
-                        "approve": False,
-                        "confidence": 0,
-                        "probability_tp_before_sl": None,
-                        "score_external": None,
-                        "reason": ["validation_queued_background"],
-                        "penalties": [],
-                        "event_type": signal.get("event"),
-                    },
-                }
-            )
-        )
+        LAST_VALIDATION.update(sanitize_for_json({
+            "ok": True,
+            "validated_at": utc_now_iso(),
+            "message": "Validation queued in background",
+            "validation": {
+                "approve": False,
+                "confidence": 0,
+                "probability_tp_before_sl": None,
+                "score_external": None,
+                "reason": ["validation_queued_background"],
+                "penalties": [],
+                "event_type": signal.get("event") or payload.get("event"),
+            },
+        }))
 
         LAST_ALERT.clear()
-        LAST_ALERT.update(
-            sanitize_for_json(
-                {
-                    "ok": True,
-                    "received_at": utc_now_iso(),
-                    "route": "/api/webhook",
-                    "processing_mode": "fast_ack_background",
-                    "trace_id": trace_id,
-                    "schema_version": payload.get("schema_version"),
-                    "message_type": payload.get("message_type"),
-                    "event_uid": payload.get("event_uid"),
-                    "symbol": signal.get("symbol"),
-                    "timeframe": signal.get("tf"),
-                    "event": signal.get("event"),
-                    "setup": signal.get("setup"),
-                    "phase": context.get("phase"),
-                    "regime": context.get("regime"),
-                    "strength": context.get("phase_strength"),
-                    "phase_5m": htf_context.get("htf_phase"),
-                    "strength_5m": htf_context.get("htf_phase_strength"),
-                    "quality_score": quality.get("quality_score"),
-                    "price": signal.get("price"),
-                    "side": signal.get("side"),
-                    "payload": payload,
-                    "validation": LAST_VALIDATION,
-                }
-            )
-        )
+        LAST_ALERT.update(sanitize_for_json({
+            "ok": True,
+            "received_at": utc_now_iso(),
+            "route": "/api/webhook",
+            "processing_mode": "fast_ack_background",
+            "trace_id": trace_id,
+            "schema_version": payload.get("schema_version"),
+            "message_type": payload.get("message_type"),
+            "event_uid": payload.get("event_uid"),
+            "symbol": signal.get("symbol") or payload.get("symbol") or payload.get("ticker"),
+            "timeframe": signal.get("tf") or payload.get("timeframe") or payload.get("tf"),
+            "event": signal.get("event") or payload.get("event"),
+            "setup": signal.get("setup") or payload.get("setup"),
+            "phase": context.get("phase"),
+            "regime": context.get("regime"),
+            "strength": context.get("phase_strength") or payload.get("strength"),
+            "phase_5m": htf_context.get("htf_phase") or payload.get("phase_5m"),
+            "strength_5m": htf_context.get("htf_phase_strength") or payload.get("strength_5m"),
+            "quality_score": quality.get("quality_score") or payload.get("quality_score") or payload.get("score"),
+            "price": signal.get("price") or payload.get("price"),
+            "side": signal.get("side") or payload.get("side"),
+            "payload": payload,
+            "validation": LAST_VALIDATION,
+        }))
 
-        # Partial CORE / EXTRA waiting
         if not payload_complete:
+            LAST_ALERT.clear()
+            LAST_ALERT.update(sanitize_for_json({
+                "ok": True,
+                "received_at": utc_now_iso(),
+                "message": "Partial payload received, waiting for CORE/EXTRA pair",
+                "event_uid": payload.get("event_uid"),
+                "message_type": payload.get("message_type"),
+                "waiting_for_pair": True,
+                "payload": payload,
+            }))
+
             return JSONResponse(
                 status_code=200,
-                content={
+                content=sanitize_for_json({
                     "ok": True,
                     "message": "Partial payload received. Waiting for matching CORE/EXTRA.",
                     "event_uid": payload.get("event_uid"),
                     "message_type": payload.get("message_type"),
-                },
+                }),
             )
 
-        # History
-        ALERT_HISTORY.append(
-            sanitize_for_json(
-                build_history_item(payload, LAST_VALIDATION)
-            )
-        )
+        history_item = sanitize_for_json(build_history_item(payload, LAST_VALIDATION))
+        ALERT_HISTORY.append(history_item)
 
-        # Background task
         background_tasks.add_task(process_alert_background, payload, trace_id)
 
         total_ms = round((time.perf_counter() - t0_total) * 1000, 2)
 
-        response_content = {
+        response_content = sanitize_for_json({
             "ok": True,
             "message": "Alert received quickly. Validation, Supabase and Telegram queued in background.",
             "trace_id": trace_id,
             "processing_ms": total_ms,
             "event_uid": payload.get("event_uid"),
             "message_type": payload.get("message_type"),
-            "event": signal.get("event"),
-            "side": signal.get("side"),
-            "symbol": signal.get("symbol"),
-        }
+            "event": signal.get("event") or payload.get("event"),
+            "side": signal.get("side") or payload.get("side"),
+            "symbol": signal.get("symbol") or payload.get("symbol") or payload.get("ticker"),
+        })
 
-        return JSONResponse(status_code=200, content=sanitize_for_json(response_content))
+        log_trace(trace_id, "webhook_fast_response_sent", response_content)
+
+        return JSONResponse(status_code=200, content=response_content)
 
     except HTTPException as e:
-        raise e
+        log_event("webhook_http_exception", {
+            "status_code": e.status_code,
+            "detail": e.detail,
+            "traceback": traceback.format_exc(),
+        })
+        raise
 
     except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content=sanitize_for_json(
-                {
-                    "ok": False,
-                    "message": "Unhandled webhook processing error",
-                    "error": str(e),
-                    "received_at": utc_now_iso(),
-                }
-            ),
-        )
+        error_response = sanitize_for_json({
+            "ok": False,
+            "message": "Unhandled webhook processing error",
+            "error": str(e),
+            "received_at": utc_now_iso(),
+        })
 
+        log_event("webhook_unhandled_exception", {
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+            "response": error_response,
+        })
 
-# ============================================================
-# SUPABASE READ ENDPOINTS
-# ============================================================
+        return JSONResponse(status_code=500, content=error_response)
+
 
 @router.get("/api/alerts/supabase")
 async def get_alerts_supabase(limit: int = 50):
@@ -431,10 +451,6 @@ async def get_alerts_supabase(limit: int = 50):
 async def get_setups_supabase(limit: int = 50):
     return await get_setups_supabase_service(limit)
 
-
-# ============================================================
-# ROOT POST ALIAS
-# ============================================================
 
 @router.post("/")
 async def root_webhook(
