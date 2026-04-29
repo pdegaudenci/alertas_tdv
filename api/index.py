@@ -1426,14 +1426,26 @@ def should_persist_payload(payload: Dict[str, Any]) -> bool:
     source = payload.get("source", {}) if isinstance(payload.get("source"), dict) else {}
     script = str(source.get("script") or payload.get("strategy_name") or "").strip()
     message_type = str(payload.get("message_type") or "").strip()
-    quality = payload.get("quality", {}) if isinstance(payload.get("quality"), dict) else {}
+    signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
+    event = str(signal.get("event") or payload.get("event") or "").upper().strip()
 
     if script == "PHASE_INDICATOR_V8_FULL_ALERTS":
         return True
 
     if script == "SETUP_CLASSIFIER_MASTER_v7_3_FULL_API_ALERTS":
         if message_type == "logical_event_full":
-            return quality.get("quality_approved") is True
+            return event in {
+                "LONG_INIT",
+                "SHORT_INIT",
+                "IMP_UP_AFTER_ADAPTIVE",
+                "IMP_DN_AFTER_ADAPTIVE",
+                "LONG_ENTRY",
+                "SHORT_ENTRY",
+                "REAL_LONG_ENTRY",
+                "REAL_SHORT_ENTRY",
+                "REAL_LONG_EXIT",
+                "REAL_SHORT_EXIT"
+            }
 
         return False
 
@@ -1580,9 +1592,9 @@ def build_lifecycle_state(payload: Dict[str, Any], validation_result: Optional[D
     if event in {"ARMED", "LONG_ARMED", "SHORT_ARMED"}:
         return "ARMED"
 
-    if event in {"LONG_INIT_AFTER_ADAPTIVE", "SHORT_INIT_AFTER_ADAPTIVE", "IMP_UP_AFTER_ADAPTIVE", "IMP_DN_AFTER_ADAPTIVE"}:
+    if event in {"LONG_INIT", "SHORT_INIT", "LONG_INIT_AFTER_ADAPTIVE", "SHORT_INIT_AFTER_ADAPTIVE", "IMP_UP_AFTER_ADAPTIVE", "IMP_DN_AFTER_ADAPTIVE"}:
         quality = payload.get("quality", {}) if isinstance(payload.get("quality"), dict) else {}
-        return "VALIDATED" if quality.get("quality_approved") is True else "REJECTED"
+        return "VALIDATED" if quality.get("quality_approved") is True else "INIT_RECEIVED"
 
     if event in {"LONG_ENTRY", "SHORT_ENTRY"}:
         if isinstance(validation_result, dict):
