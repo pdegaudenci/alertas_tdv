@@ -124,6 +124,13 @@ from services.explanation_service import (
     explicacion_prob_rentable,
     explicacion_calidad_setup,
 )
+
+from components.ui_helpers import (
+    render_info_item,
+    render_json_expander,
+    render_text_list,
+    render_section_divider,
+)
 # ============================================================
 # STREAMLIT PAGE
 # ============================================================
@@ -496,23 +503,6 @@ def get_alerts_history(limit: int = 50) -> Dict:
 # ============================================================
 # HELPERS UI - LEYENDAS / EXPLICACIONES
 # ============================================================
-
-def render_info_item(titulo: str, explicacion: str, estado: str = "info") -> None:
-    """
-    Muestra una línea con icono + texto y debajo un desplegable pequeño con explicación.
-    estado: info | success | warning | error
-    """
-    if estado == "success":
-        st.success(titulo)
-    elif estado == "warning":
-        st.warning(titulo)
-    elif estado == "error":
-        st.error(titulo)
-    else:
-        st.info(titulo)
-
-    with st.expander(f"ℹ️ Ver explicación: {titulo}", expanded=False):
-        st.write(explicacion)
 
 
 # ============================================================
