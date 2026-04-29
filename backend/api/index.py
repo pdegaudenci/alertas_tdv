@@ -1,9 +1,10 @@
 """
-Wrapper de entrada para Vercel.
+Entrypoint de Vercel para FastAPI.
 
-Vercel suele esperar un archivo api/index.py como entrypoint.
-Este archivo no contiene lógica propia: solo expone la app FastAPI real definida
-en app/main.py.
+Este archivo expone una variable global llamada `app`, requerida por Vercel.
+La app real está definida en app/main.py.
 """
 
-from app.main import app
+from app.main import app as fastapi_app
+
+app = fastapi_app
