@@ -131,6 +131,21 @@ from components.ui_helpers import (
     render_text_list,
     render_section_divider,
 )
+
+from services.alert_view_service import (
+    unwrap_latest_response,
+    extract_latest_alert_summary,
+    build_alert_history_dataframe,
+    build_alert_expander_title,
+    extract_alert_detail,
+)
+
+from services.validation_view_service import (
+    extract_validation_block,
+    build_validation_metrics,
+    extract_validation_sections,
+    get_approve_status_message,
+)
 # ============================================================
 # STREAMLIT PAGE
 # ============================================================
@@ -632,6 +647,10 @@ tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs([
 ])
 
 #  VISUALIZACION HITORICO ALERTAS
+# ============================================================
+# TAB 0 - MONITOR BACKEND / HISTÓRICO ALERTAS
+# ============================================================
+
 with tab0:
     st.subheader("📡 Monitor de alertas procesadas por Vercel")
 
@@ -643,11 +662,16 @@ with tab0:
             st.rerun()
 
     with colb2:
-        history_limit = st.selectbox("Número de alertas a mostrar", [10, 20, 50, 100], index=2)
+        history_limit = st.selectbox(
+            "Número de alertas a mostrar",
+            [10, 20, 50, 100],
+            index=2
+        )
 
     try:
         latest_response = get_latest_backend_data()
-        latest_data = latest_response.get("data", latest_response) if isinstance(latest_response, dict) else {}
+        latest_data = unwrap_latest_response(latest_response)
+
         latest_validation = get_latest_validation_data()
         alerts_history = get_alerts_history_supabase(history_limit)
 
@@ -656,60 +680,72 @@ with tab0:
         # ============================================================
         # ÚLTIMA ALERTA - RESUMEN
         # ============================================================
+
         if latest_data.get("ok"):
             st.markdown("## Última alerta recibida")
 
-            validation = latest_data.get("validation", {}) or {}
-            validation_block = validation.get("validation", {}) if isinstance(validation, dict) else {}
-            payload_block = latest_data.get("payload", {}) or {}
+            latest_summary = extract_latest_alert_summary(latest_data)
+
+            validation = latest_summary.get("validation", {}) or {}
+            validation_block = extract_validation_block(latest_data)
+            validation_metrics = build_validation_metrics(validation_block)
+            validation_sections = extract_validation_sections(validation_block)
+
+            payload_block = latest_summary.get("payload", {}) or {}
 
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Símbolo", latest_data.get("symbol", "-"))
-            c2.metric("Side", str(latest_data.get("side", "-")).upper())
-            c3.metric("Evento", latest_data.get("event", "-"))
-            c4.metric("TF", latest_data.get("timeframe", "-"))
+            c1.metric("Símbolo", latest_summary.get("symbol", "-"))
+            c2.metric("Side", str(latest_summary.get("side", "-")).upper())
+            c3.metric("Evento", latest_summary.get("event", "-"))
+            c4.metric("TF", latest_summary.get("timeframe", "-"))
 
             c5, c6, c7, c8 = st.columns(4)
-            c5.metric("Precio", latest_data.get("price", "-"))
-            c6.metric("Phase", latest_data.get("phase", "-"))
-            c7.metric("Regime", latest_data.get("regime", "-"))
-            c8.metric("Quality", latest_data.get("quality_score", "-"))
+            c5.metric("Precio", latest_summary.get("price", "-"))
+            c6.metric("Phase", latest_summary.get("phase", "-"))
+            c7.metric("Regime", latest_summary.get("regime", "-"))
+            c8.metric("Quality", latest_summary.get("quality_score", "-"))
 
-            st.write("Setup:", latest_data.get("setup", "-"))
-            st.write("Phase 5m:", latest_data.get("phase_5m", "-"))
-            st.write("Strength 5m:", latest_data.get("strength_5m", "-"))
-            st.write("Recibida:", latest_data.get("received_at", "-"))
+            st.write("Setup:", latest_summary.get("setup", "-"))
+            st.write("Phase 5m:", latest_summary.get("phase_5m", "-"))
+            st.write("Strength 5m:", latest_summary.get("strength_5m", "-"))
+            st.write("Recibida:", latest_summary.get("received_at", "-"))
+            st.write("Trace ID:", latest_summary.get("trace_id", "-"))
+            st.write("Message type:", latest_summary.get("message_type", "-"))
+            st.write("Event UID:", latest_summary.get("event_uid", "-"))
+
+            # ============================================================
+            # RESULTADO DE VALIDACIÓN
+            # ============================================================
 
             st.markdown("---")
             st.markdown("## Resultado de validación")
 
-            approve = validation_block.get("approve")
-            confidence = validation_block.get("confidence")
-            prob_tp = validation_block.get("probability_tp_before_sl")
-            score_external = validation_block.get("score_external")
+            approve = validation_metrics["approve"]
+            confidence = validation_metrics["confidence"]
+            prob_tp = validation_metrics["prob_tp"]
+            score_external = validation_metrics["score_external"]
 
             v1, v2, v3, v4 = st.columns(4)
-            v1.metric("Approve", "YES" if approve else "NO")
-            v2.metric("Confidence", f"{confidence}%" if confidence is not None else "-")
-            v3.metric(
-                "Prob TP antes SL",
-                f"{round(prob_tp * 100, 2)}%" if isinstance(prob_tp, (float, int)) and prob_tp <= 1 else prob_tp
-            )
-            v4.metric("Score externo", score_external if score_external is not None else "-")
+            v1.metric("Approve", validation_metrics["approve_label"])
+            v2.metric("Confidence", validation_metrics["confidence_label"])
+            v3.metric("Prob TP antes SL", validation_metrics["prob_tp_label"])
+            v4.metric("Score externo", validation_metrics["score_external_label"])
 
-            if approve is True:
-                st.success("✅ Señal aprobada por Validation Layer")
-            elif approve is False:
-                st.error("⛔ Señal rechazada por Validation Layer")
+            approve_message = get_approve_status_message(approve)
+
+            if approve_message["status"] == "success":
+                st.success(approve_message["message"])
+            elif approve_message["status"] == "error":
+                st.error(approve_message["message"])
             else:
-                st.warning("⚠ Validación no disponible")
+                st.warning(approve_message["message"])
 
-            st.write("TP:", validation_block.get("tp", "-"))
-            st.write("SL:", validation_block.get("sl", "-"))
-            st.write("RR:", validation_block.get("rr", "-"))
+            st.write("TP:", validation_metrics["tp"])
+            st.write("SL:", validation_metrics["sl"])
+            st.write("RR:", validation_metrics["rr"])
 
-            reasons = validation_block.get("reason", []) or []
-            penalties = validation_block.get("penalties", []) or []
+            reasons = validation_sections["reasons"]
+            penalties = validation_sections["penalties"]
 
             colr, colp = st.columns(2)
 
@@ -729,16 +765,93 @@ with tab0:
                 else:
                     st.info("Sin penalizaciones registradas")
 
-            market_snapshot = validation_block.get("market_snapshot", {}) or {}
+            # ============================================================
+            # VALIDATION STEPS
+            # ============================================================
+
+            validation_steps = validation_sections["validation_steps"]
+
+            if validation_steps:
+                st.markdown("---")
+                st.markdown("## Validation Steps")
+
+                for step_name, step_data in validation_steps.items():
+                    if not isinstance(step_data, dict):
+                        continue
+
+                    titulo = f"{step_name} → {step_data.get('status', '-')}"
+
+                    if step_data.get("ok"):
+                        st.success(titulo)
+                    else:
+                        st.error(titulo)
+
+                    st.write("Motivo:", step_data.get("reason", "-"))
+
+                    if step_data.get("details"):
+                        with st.expander(f"Detalles de {step_name}", expanded=False):
+                            st.json(step_data.get("details", {}))
+
+            # ============================================================
+            # ANALYSIS TRACE / SUMMARY
+            # ============================================================
+
+            analysis_trace = validation_sections["analysis_trace"]
+            analysis_summary = validation_sections["analysis_summary"]
+
+            if analysis_trace:
+                st.markdown("---")
+                st.markdown("## Motor de análisis")
+
+                for line in analysis_trace:
+                    st.write("•", line)
+
+            if analysis_summary:
+                st.markdown("---")
+                st.markdown("## Resumen del análisis")
+
+                st.info(f"Contexto: {analysis_summary.get('market_context', '-')}")
+                st.info(f"Ejecución: {analysis_summary.get('execution_quality', '-')}")
+                st.info(f"Riesgo: {analysis_summary.get('risk_reading', '-')}")
+                st.success(f"Conclusión final: {analysis_summary.get('final_conclusion', '-')}")
+                st.write(analysis_summary.get("score_comment", ""))
+
+            # ============================================================
+            # SNAPSHOT DE MERCADO
+            # ============================================================
+
+            market_snapshot = validation_sections["market_snapshot"]
+
             if market_snapshot:
+                st.markdown("---")
                 st.markdown("### Snapshot de mercado usado por backend")
+
                 snap_df = pd.DataFrame([market_snapshot])
                 st.dataframe(snap_df, use_container_width=True)
 
-            structure_snapshot = validation_block.get("structure_snapshot", {}) or {}
+            # ============================================================
+            # SNAPSHOT ESTRUCTURAL
+            # ============================================================
+
+            structure_snapshot = validation_sections["structure_snapshot"]
+
             if structure_snapshot:
                 st.markdown("### Snapshot estructural")
                 st.json(structure_snapshot)
+
+            # ============================================================
+            # ALERT REUSED / CONTEXTO REUTILIZADO
+            # ============================================================
+
+            alert_reused = validation_sections["alert_reused"]
+
+            if alert_reused:
+                st.markdown("### Datos reutilizados desde alerta Pine")
+                st.json(alert_reused)
+
+            # ============================================================
+            # PAYLOADS COMPLETOS
+            # ============================================================
 
             st.markdown("---")
             st.markdown("## Payload completo de la última alerta")
@@ -754,76 +867,65 @@ with tab0:
             with st.expander("Ver objeto completo /api/validation/latest", expanded=False):
                 st.json(latest_validation)
 
+        else:
+            st.warning("Todavía no hay última alerta válida en el backend.")
+            with st.expander("Respuesta recibida desde /api/latest", expanded=False):
+                st.json(latest_data)
+
         # ============================================================
         # HISTÓRICO RESUMIDO
         # ============================================================
+
         st.markdown("---")
         st.markdown("## Histórico resumido de alertas procesadas")
 
         items = alerts_history.get("items", []) if isinstance(alerts_history, dict) else []
+
         if items:
-            rows = []
-            for item in items:
-                rows.append({
-                    "created_at": item.get("created_at"),
-                    "symbol": item.get("symbol"),
-                    "tf": item.get("tf"),
-                    "event": item.get("event"),
-                    "side": item.get("side"),
-                    "status": item.get("status"),
-                    "setup_id": item.get("setup_id"),
-                    "phase": item.get("phase"),
-                    "regime": item.get("regime"),
-                    "dir_state": item.get("dir_state"),
-                    "mov_state": item.get("mov_state"),
-                    "liq_state": item.get("liq_state"),
-                    "htf_phase": item.get("htf_phase"),
-                    "trigger_alignment": item.get("trigger_alignment"),
-                    "spread_bps": item.get("spread_bps"),
-                    "book_imbalance": item.get("book_imbalance"),
-                })
-        
-            df_alerts = pd.DataFrame(rows)
+            df_alerts = build_alert_history_dataframe(items)
             st.dataframe(df_alerts, use_container_width=True)
-        
+
             st.markdown("### Detalle expandible")
+
             for idx, item in enumerate(items[:20]):
-                titulo = (
-                    f"{idx+1}. {item.get('created_at', '-')} | "
-                    f"{item.get('symbol', '-')} | "
-                    f"{item.get('event', '-')} | "
-                    f"{str(item.get('side', '-')).upper()}"
-                )
+                titulo = build_alert_expander_title(idx, item)
+
                 with st.expander(titulo, expanded=False):
-                    st.write("Setup ID:", item.get("setup_id"))
-                    st.write("Status:", item.get("status"))
-                    st.write("Phase:", item.get("phase"))
-                    st.write("Regime:", item.get("regime"))
-                    st.write("Dir state:", item.get("dir_state"))
-                    st.write("Mov state:", item.get("mov_state"))
-                    st.write("Liq state:", item.get("liq_state"))
-                    st.write("HTF phase:", item.get("htf_phase"))
-                    st.write("Trigger alignment:", item.get("trigger_alignment"))
-                    st.write("Spread bps:", item.get("spread_bps"))
-                    st.write("Book imbalance:", item.get("book_imbalance"))
-        
+                    detail = extract_alert_detail(item)
+
+                    st.write("Setup ID:", detail.get("setup_id"))
+                    st.write("Status:", detail.get("status"))
+                    st.write("Phase:", detail.get("phase"))
+                    st.write("Regime:", detail.get("regime"))
+                    st.write("Dir state:", detail.get("dir_state"))
+                    st.write("Mov state:", detail.get("mov_state"))
+                    st.write("Liq state:", detail.get("liq_state"))
+                    st.write("HTF phase:", detail.get("htf_phase"))
+                    st.write("Trigger alignment:", detail.get("trigger_alignment"))
+                    st.write("Spread bps:", detail.get("spread_bps"))
+                    st.write("Book imbalance:", detail.get("book_imbalance"))
+
                     st.markdown("#### Normalized payload")
-                    st.json(item.get("normalized_payload", {}))
-        
+                    st.json(detail.get("normalized_payload", {}))
+
                     st.markdown("#### Technical state")
-                    st.json(item.get("technical_state", {}))
-        
+                    st.json(detail.get("technical_state", {}))
+
                     st.markdown("#### Microstructure state")
-                    st.json(item.get("microstructure_state", {}))
-        
+                    st.json(detail.get("microstructure_state", {}))
+
                     st.markdown("#### Raw payload")
-                    st.json(item.get("raw_payload", {}))
+                    st.json(detail.get("raw_payload", {}))
+
         else:
             st.info("No hay histórico disponible todavía")
-        
+
+            if isinstance(alerts_history, dict) and not alerts_history.get("ok", True):
+                with st.expander("Respuesta de error del histórico Supabase", expanded=False):
+                    st.json(alerts_history)
+
     except Exception as e:
-                st.error(f"Error conectando con backend: {e}")
-        
+        st.error(f"Error conectando con backend: {e}")    
 # ============================================================
 # TAB 1 - CONTEXTO
 # ============================================================
