@@ -1,7 +1,7 @@
 """
 Servicio principal de validación.
 
-La lógica para:
+Logica para:
 - build_validation_step
 - build_analysis_outputs
 - run_validation
@@ -10,24 +10,39 @@ Orquesta:
 alerta TradingView -> normalización -> market data -> scoring ->
 probabilidad TP antes que SL -> pasos de validación -> respuesta final.
 
+Mantiene la lógica original:
+- validación solo completa para eventos ENTRY reales/lógicos
+- skip controlado para eventos no-entry
+- market_snapshot
+- structure_snapshot
+- alert_reused
+- normalized_alert en la respuesta final
+- validation_steps completo
+- analysis_trace
+- analysis_summary
+
+
 """
 
-from typing import Any, Dict, Tuple, List
+from typing import Any, Dict
 
 from fastapi import HTTPException
 
-from app.utils.serialization import utc_now_iso, sanitize_for_json
+from app.utils.time_utils import utc_now_iso
+from app.utils.json_utils import sanitize_for_json
 from app.utils.math_utils import safe_float
-from app.services.alert_schema_service import normalize_alert
-from app.services.market_data_service import (
+
+from app.services.alert_service import normalize_alert
+from app.services.market_features_service import (
     collect_market_data,
     extract_latest_features,
+    detect_swings,
 )
-from app.services.structure_service import detect_swings
 from app.services.scoring_service import compute_external_scores
 from app.services.probability_service import estimate_tp_before_sl_probability
+
 from app.core.config import VALIDATION_THRESHOLD, MIN_SCORE_THRESHOLD
-from app.core.logger import log_event
+from app.core.logging import log_event
 
 
 # ============================================================
@@ -50,7 +65,6 @@ def build_analysis_outputs(
     score_external: float | None,
     approve: bool
 ) -> tuple[list[str], dict]:
-
     trace = []
 
     event = normalized_alert.get("event", "UNKNOWN")
@@ -134,13 +148,9 @@ def build_analysis_outputs(
 # ============================================================
 
 async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
-
     signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
     event = str(signal.get("event") or payload.get("event") or "").upper()
 
-    # --------------------------------------------------------
-    # Skip non-entry events
-    # --------------------------------------------------------
     if event not in {"LONG_ENTRY", "SHORT_ENTRY", "REAL_LONG_ENTRY", "REAL_SHORT_ENTRY"}:
         result = {
             "ok": True,
@@ -184,9 +194,6 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
         }
         return sanitize_for_json(result)
 
-    # --------------------------------------------------------
-    # Normalize alert
-    # --------------------------------------------------------
     normalized = normalize_alert(payload)
 
     if normalized["side"] not in {"long", "short"}:
@@ -195,11 +202,7 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not normalized["symbol"]:
         raise HTTPException(status_code=400, detail="Payload missing symbol")
 
-    # --------------------------------------------------------
-    # Collect market data
-    # --------------------------------------------------------
     market = await collect_market_data(normalized["symbol"])
-
     df1 = market["df1"]
     df5 = market["df5"]
 
@@ -208,12 +211,8 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     f1 = extract_latest_features(df1)
     f5 = extract_latest_features(df5)
-
     structure = detect_swings(df1, lookback=5)
 
-    # --------------------------------------------------------
-    # External scoring
-    # --------------------------------------------------------
     ext = compute_external_scores(
         normalized_alert=normalized,
         f1=f1,
@@ -223,9 +222,6 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
         structure=structure
     )
 
-    # --------------------------------------------------------
-    # Probability model
-    # --------------------------------------------------------
     prob = estimate_tp_before_sl_probability(
         normalized_alert=normalized,
         backend_features=ext["backend_feature_pack"],
@@ -254,12 +250,9 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     # ========================================================
-    # CONTEXT
+    # CONTEXT VALIDATION
     # ========================================================
-    context_ok = (
-        "htf_aligned" in ext["reasons"] or
-        "ema_trend_aligned" in ext["reasons"]
-    )
+    context_ok = "htf_aligned" in ext["reasons"] or "ema_trend_aligned" in ext["reasons"]
 
     validation_steps["context_validation"] = build_validation_step(
         ok=context_ok,
@@ -281,7 +274,7 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     # ========================================================
-    # MICROSTRUCTURE
+    # MICROSTRUCTURE VALIDATION
     # ========================================================
     micro_ok = (
         safe_float(market["order_book"].get("spread_bps"), 999.0) <= 2.5 and
@@ -309,7 +302,7 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     # ========================================================
-    # FLOW
+    # FLOW VALIDATION
     # ========================================================
     flow_ok = (
         (normalized["side"] == "long" and safe_float(market["flow"].get("delta_qty"), 0.0) > 0.0) or
@@ -332,7 +325,7 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     # ========================================================
-    # TP ROOM
+    # TP ROOM VALIDATION
     # ========================================================
     tp_room_ok = ext["backend_feature_pack"].get("tp_room_ok", 0.0) > 0
 
@@ -353,12 +346,9 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     # ========================================================
-    # EXTENSION
+    # EXTENSION VALIDATION
     # ========================================================
-    extension_ok = (
-        not normalized.get("too_extended_block_alert", False)
-        and not normalized.get("late_trend_alert", False)
-    )
+    extension_ok = not normalized.get("too_extended_block_alert", False) and not normalized.get("late_trend_alert", False)
 
     validation_steps["extension_validation"] = build_validation_step(
         ok=extension_ok,
@@ -375,7 +365,7 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     # ========================================================
-    # TP PROBABILITY
+    # PROBABILITY VALIDATION
     # ========================================================
     tp_prob_ok = safe_float(prob.get("probability_tp_before_sl"), 0.0) >= VALIDATION_THRESHOLD
 
@@ -396,7 +386,7 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     # ========================================================
-    # SCORE
+    # SCORE VALIDATION
     # ========================================================
     score_ok = safe_float(ext.get("score_external"), 0.0) >= MIN_SCORE_THRESHOLD
 
@@ -415,9 +405,6 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
         }
     )
 
-    # ========================================================
-    # FINAL DECISION
-    # ========================================================
     approve = bool(
         safe_float(prob.get("probability_tp_before_sl"), 0.0) >= VALIDATION_THRESHOLD and
         safe_float(ext.get("score_external"), 0.0) >= MIN_SCORE_THRESHOLD and
@@ -439,12 +426,7 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
     })
 
     confidence = round(safe_float(prob.get("probability_tp_before_sl"), 0.0) * 100.0, 2)
-
-    entry_price = (
-        normalized["entry_price"]
-        if safe_float(normalized["entry_price"], 0.0) > 0
-        else f1["close"]
-    )
+    entry_price = normalized["entry_price"] if safe_float(normalized["entry_price"], 0.0) > 0 else f1["close"]
 
     validation = {
         "approve": approve,
@@ -468,6 +450,49 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
         "validation_steps": validation_steps,
         "analysis_trace": analysis_trace,
         "analysis_summary": analysis_summary,
+        "market_snapshot": {
+            "close_1m": round(safe_float(f1["close"]), 4),
+            "ema20_1m": round(safe_float(f1["ema20"]), 4),
+            "ema50_1m": round(safe_float(f1["ema50"]), 4),
+            "ema200_1m": round(safe_float(f1["ema200"]), 4),
+            "adx_1m": round(safe_float(f1["adx"]), 2),
+            "plus_di_1m": round(safe_float(f1["plus_di"]), 2),
+            "minus_di_1m": round(safe_float(f1["minus_di"]), 2),
+            "atr14_1m": round(safe_float(f1["atr14"]), 4),
+            "rvol20_1m": round(safe_float(f1["rvol20"], 1.0), 3),
+            "impulse_atr_1m": round(safe_float(f1["impulse_atr"]), 3),
+            "dist_to_vwap_pct_1m": round(safe_float(f1["dist_to_vwap_pct"]), 4),
+            "spread_bps": round(safe_float(market["order_book"].get("spread_bps")), 4),
+            "book_imbalance": round(safe_float(market["order_book"].get("book_imbalance")), 4),
+            "buy_aggression": round(safe_float(market["flow"].get("buy_aggression")), 4),
+            "sell_aggression": round(safe_float(market["flow"].get("sell_aggression")), 4),
+            "delta_qty": round(safe_float(market["flow"].get("delta_qty")), 6),
+            "bid_wall_detected": market["order_book"].get("bid_wall_detected"),
+            "ask_wall_detected": market["order_book"].get("ask_wall_detected"),
+            "vacuum_above": market["order_book"].get("vacuum_above"),
+            "vacuum_below": market["order_book"].get("vacuum_below"),
+        },
+        "structure_snapshot": {
+            "last_swing_high": structure.get("last_swing_high"),
+            "last_swing_low": structure.get("last_swing_low"),
+            "distance_to_swing_high_pct": structure.get("distance_to_swing_high_pct"),
+            "distance_to_swing_low_pct": structure.get("distance_to_swing_low_pct"),
+            "range_mode": structure.get("range_mode"),
+            "compression_box": structure.get("compression_box"),
+        },
+        "alert_reused": {
+            "regime": normalized.get("regime"),
+            "phase": normalized.get("phase"),
+            "dir_state": normalized.get("dir_state"),
+            "mov_state": normalized.get("mov_state"),
+            "liq_state": normalized.get("liq_state"),
+            "htf_phase": normalized.get("htf_phase"),
+            "htf_phase_strength": normalized.get("htf_phase_strength"),
+            "trigger_alignment": normalized.get("trigger_alignment"),
+            "too_extended_warn_alert": normalized.get("too_extended_warn_alert"),
+            "too_extended_block_alert": normalized.get("too_extended_block_alert"),
+            "late_trend_alert": normalized.get("late_trend_alert"),
+        }
     }
 
     result = {
@@ -475,6 +500,19 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
         "validated_at": utc_now_iso(),
         "message": "Validation completed",
         "validation": validation,
+        "normalized_alert": {
+            "schema_version": normalized["schema_version"],
+            "message_type": normalized["message_type"],
+            "symbol": normalized["symbol"],
+            "side": normalized["side"],
+            "event": normalized["event"],
+            "tf": normalized["tf"],
+            "entry_price": normalized["entry_price"],
+            "tp_price_alert": normalized["tp_price"],
+            "sl_price_alert": normalized["sl_price"],
+            "quality_score_alert": normalized["quality_score_alert"],
+            "quality_class_alert": normalized["quality_class_alert"],
+        }
     }
 
     return sanitize_for_json(result)

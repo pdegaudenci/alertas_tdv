@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+httpx
+numpy
+pandas
+scipy
+requests
+supabase
+joblib
+scikit-learn

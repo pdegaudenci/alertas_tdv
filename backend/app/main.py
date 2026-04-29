@@ -1,18 +1,16 @@
 """
 Entrada principal de FastAPI.
 
-Este archivo crea la app FastAPI y configura CORS. 
+Este archivo crea la instancia principal de FastAPI, configura CORS y registra
+las rutas del backend mediante include_router.
 """
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.core.config import (
-    ALLOWED_ORIGINS,
-    BINANCE_BASE_URLS,
-    SKLEARN_MODEL,
-)
-from app.utils.time_utils import utc_now_iso
+from app.core.config import ALLOWED_ORIGINS
+from app.api.routes import router
+
 
 app = FastAPI(
     title="TradingView Validation Layer",
@@ -27,21 +25,4 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-@app.get("/")
-async def healthcheck():
-    return {
-        "ok": True,
-        "service": "tradingview-validation-layer",
-        "timestamp": utc_now_iso(),
-        "routes": [
-            "/",
-            "/api/latest",
-            "/api/webhook",
-            "/api/validate",
-            "/api/health/binance",
-        ],
-        "binance_base_urls": BINANCE_BASE_URLS,
-        "model_loaded": SKLEARN_MODEL is not None,
-        "allowed_origins": ALLOWED_ORIGINS,
-    }
+app.include_router(router)
