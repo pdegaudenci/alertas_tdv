@@ -8,8 +8,7 @@ import pytz
 import requests
 import streamlit as st
 from scipy.signal import argrelextrema
-import streamlit as st
-import requests
+
 from core.config import (
     BACKEND_BASE_URL,
     BACKEND_LATEST_URL,
@@ -40,6 +39,18 @@ from core.constants import (
 from core.session_state import init_session_state
 from utils.math_utils import safe_float, rating_score, calcular_trailing
 from utils.time_utils import madrid_to_utc_timestamp
+
+from clients.backend_client import (
+    fetch_backend_json,
+    get_latest_backend_data,
+    get_latest_validation_data,
+    get_alerts_history,
+    get_alerts_history_supabase,
+    get_setups_supabase,
+    health_backend,
+    health_binance,
+    health_supabase,
+)
 # ============================================================
 # STREAMLIT PAGE
 # ============================================================
@@ -50,9 +61,8 @@ st.set_page_config(
 )
 
 init_session_state()
-@st.cache_data(ttl=5, show_spinner=False)
-def get_alerts_history_supabase(limit: int = 50) -> Dict:
-    return fetch_backend_json(f"{BACKEND_ALERTS_SUPABASE_URL}?limit={limit}")
+
+
 st.title("Panel de alertas TradingView")
 auto_refresh = st.sidebar.checkbox("Auto refresh backend", value=True)
 refresh_seconds = st.sidebar.slider("Refresh backend cada segundos", 5, 60, 10)
@@ -61,13 +71,14 @@ if auto_refresh:
     st.sidebar.info(f"Auto refresh activo cada {refresh_seconds}s")
 if st.button("Cargar última alerta"):
     try:
-        response = requests.get(BACKEND_LATEST_URL, timeout=10)
-        response.raise_for_status()
-        data = response.json()
+        data = get_latest_backend_data()
 
-        st.success("Backend conectado correctamente")
+        if not data.get("ok"):
+            st.error(data.get("message", "Backend no disponible"))
+            st.json(data)
+        else:
+            st.success("Backend conectado correctamente")
 
-        if data.get("ok"):
             st.subheader("Última señal")
             st.write("Ticker:", data.get("symbol", "-"))
             st.write("Side:", data.get("side", "-"))
@@ -81,6 +92,8 @@ if st.button("Cargar última alerta"):
             st.write("Phase 5m:", data.get("phase_5m", "-"))
             st.write("Strength 5m:", data.get("strength_5m", "-"))
             st.write("Recibida:", data.get("received_at", "-"))
+
+            # aquí sigue tu bloque original sin cambios
 
             validation = data.get("validation", {}) or {}
             validation_block = validation.get("validation", {}) if isinstance(validation, dict) else {}
@@ -543,25 +556,7 @@ def supertrend(
 # ============================================================
 # HELPERS UI - LEYENDAS / EXPLICACIONES
 # ============================================================
-def fetch_backend_json(url: str, timeout: int = 10) -> Dict:
-    response = requests.get(url, timeout=timeout)
-    response.raise_for_status()
-    return response.json()
 
-
-@st.cache_data(ttl=5, show_spinner=False)
-def get_latest_backend_data() -> Dict:
-    return fetch_backend_json(BACKEND_LATEST_URL)
-
-
-@st.cache_data(ttl=5, show_spinner=False)
-def get_latest_validation_data() -> Dict:
-    return fetch_backend_json(BACKEND_VALIDATION_URL)
-
-
-@st.cache_data(ttl=5, show_spinner=False)
-def get_alerts_history(limit: int = 50) -> Dict:
-    return fetch_backend_json(f"{BACKEND_ALERTS_URL}?limit={limit}")
 def render_info_item(titulo: str, explicacion: str, estado: str = "info") -> None:
     """
     Muestra una línea con icono + texto y debajo un desplegable pequeño con explicación.
