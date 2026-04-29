@@ -5,3 +5,4 @@ requests
 pytz
 scipy
 python-dotenv
+streamlit-autorefresh
