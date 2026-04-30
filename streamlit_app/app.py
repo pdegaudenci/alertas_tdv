@@ -158,6 +158,7 @@ from views.liquidity_view import render_liquidity_tab
 from views.mtf_view import render_mtf_tab
 from views.backtest_view import render_backtest_tab
 from views.trade_evaluator_view import render_trade_evaluator_tab
+from views.current_signal_view import render_current_signal_view
 # ============================================================
 # STREAMLIT PAGE
 # ============================================================
@@ -603,36 +604,10 @@ col4.metric("Probabilidad base", f"{contexto['probabilidad']:.1f}%")
 # ============================================================
 # SEÑAL ACTUAL
 # ============================================================
-st.subheader("Señal Actual del Entorno")
-
-trade_levels_long = compute_trade_levels(
-    entrada=contexto["price_1m"],
-    direccion="LONG",
+render_current_signal_view(
+    contexto=contexto,
     df_5m=df_5m,
-    adx_5m=contexto["adx_5m"]
 )
-
-trade_levels_short = compute_trade_levels(
-    entrada=contexto["price_1m"],
-    direccion="SHORT",
-    df_5m=df_5m,
-    adx_5m=contexto["adx_5m"]
-)
-
-if contexto["long_valido"] and not contexto["short_valido"]:
-    st.success("🚀 LONG VÁLIDO")
-    st.write("TP:", round(trade_levels_long["tp"], 2))
-    st.write("SL:", round(trade_levels_long["sl"], 2))
-    log_signal("LONG", contexto["probabilidad"], contexto["fase"], contexto["adx_5m"], contexto["rsi_1m"])
-elif contexto["short_valido"] and not contexto["long_valido"]:
-    st.error("🔻 SHORT VÁLIDO")
-    st.write("TP:", round(trade_levels_short["tp"], 2))
-    st.write("SL:", round(trade_levels_short["sl"], 2))
-    log_signal("SHORT", contexto["probabilidad"], contexto["fase"], contexto["adx_5m"], contexto["rsi_1m"])
-elif contexto["long_valido"] and contexto["short_valido"]:
-    st.warning("⚠ Contexto ambiguo. Esperar confirmación externa del trigger.")
-else:
-    st.warning("⏳ ESPERAR")
 
 # ============================================================
 # TABS

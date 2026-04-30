@@ -11,8 +11,8 @@ No contiene lógica de cálculo.
 # TRADE CONFIG
 # ============================================================
 
-TP_BASE = 0.6          # %
-SL_BASE = 0.35         # %
+TP_BASE = 0.35          # %
+SL_BASE = 0.15         # %
 RISK_REWARD_WEIGHT = 0.4
 
 
