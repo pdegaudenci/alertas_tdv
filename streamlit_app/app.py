@@ -153,7 +153,8 @@ from views.sidebar import (
 )
 
 from views.backend_monitor_view import render_backend_monitor_tab
-
+from views.context_view import render_context_tab
+from views.liquidity_view import render_liquidity_tab
 # ============================================================
 # STREAMLIT PAGE
 # ============================================================
@@ -643,160 +644,27 @@ tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs([
 ])
 
 #  VISUALIZACION HITORICO ALERTAS
-# ============================================================
-# TAB 0 - MONITOR BACKEND / HISTÓRICO ALERTAS
-# ============================================================
+
 # ============================================================
 # TAB 0 - MONITOR BACKEND
 # ============================================================
 with tab0:
     render_backend_monitor_tab()
-    
+
 # ============================================================
 # TAB 1 - CONTEXTO
 # ============================================================
 with tab1:
-    st.subheader("🌍 Régimen de Mercado")
-    st.write("Estado actual:", contexto["market_regime"])
-
-    if contexto["market_regime"] == "RANGO":
-        st.error("Mercado lateral — alto riesgo de stops")
-    elif contexto["market_regime"] == "TRANSICIÓN":
-        st.warning("Mercado inestable")
-    elif contexto["market_regime"] == "EXPANSIÓN":
-        st.success("Movimiento limpio probable")
-    elif contexto["market_regime"] == "TENDENCIA":
-        st.success("Alta continuidad direccional")
-    else:
-        st.info("Contexto neutro")
-
-    st.markdown("---")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("RSI 1m", f"{contexto['rsi_1m']:.2f}")
-    c2.metric("ROC 1m", f"{contexto['roc']:.4f}")
-    c3.metric("ATR actual", f"{contexto['atr']:.2f}")
-
-    st.subheader("🧠 Contexto de Mercado")
-    st.write("Precio vs VWAP:", "Encima (alcista)" if contexto["above_vwap"] else "Debajo (bajista)")
-    st.write("Precio vs EMA200 5m:", "Encima" if contexto["above_ema200"] else "Debajo")
-    st.write("Stack EMAs 1m:", "Alcista" if contexto["ema_bullish_stack"] else "Bajista" if contexto["ema_bearish_stack"] else "Mixto")
-    st.write("No agotamiento:", contexto["no_agotamiento"])
-    st.write("Espacio LONG:", contexto["espacio_long"])
-    st.write("Espacio SHORT:", contexto["espacio_short"])
-
-    st.subheader("🧱 Compresión de Volatilidad")
-    st.write("Bollinger Width:", round(contexto["bb_width"], 4))
-
-    if contexto["bb_width"] < 0.002:
-        st.error("Alta compresión — NO OPERAR")
-    elif contexto["bb_width"] < 0.004:
-        st.warning("Mercado apretado")
-    else:
-        st.success("Volatilidad suficiente")
-
-    st.subheader("📐 Valor Esperado del Trade (base)")
-    st.write("EV:", round(contexto["EV"], 4), "%")
-
-    if contexto["EV"] > 0.12:
-        st.success("Ventaja matemática clara")
-    elif contexto["EV"] > 0:
-        st.info("Trade ligeramente favorable")
-    else:
-        st.error("Trade con esperanza negativa — evitar")
+    render_context_tab(contexto)
 
 # ============================================================
 # TAB 2 - LIQUIDEZ
 # ============================================================
+# ============================================================
+# TAB 2 - LIQUIDEZ
+# ============================================================
 with tab2:
-    st.subheader("💧 Liquidez cercana")
-
-    dist_up_pct = liquidity["dist_up_pct"]
-    dist_down_pct = liquidity["dist_down_pct"]
-
-    micro_risk = False
-    if dist_up_pct is not None and dist_up_pct < 0.0025:
-        st.warning("Stops muy cerca arriba → posible sweep alcista inmediato")
-        micro_risk = True
-    if dist_down_pct is not None and dist_down_pct < 0.0025:
-        st.warning("Stops muy cerca abajo → posible sweep bajista inmediato")
-        micro_risk = True
-    if not micro_risk:
-        st.success("No hay liquidez inmediata peligrosa")
-
-    st.markdown("---")
-    col1, col2 = st.columns(2)
-
-    with col1:
-        if liquidity["nearest_resistance"] is None:
-            st.metric("Liquidez arriba (ATR)", "∞")
-            st.success("No existe liquidez por encima → price discovery alcista")
-        else:
-            dist_up_atr = (liquidity["nearest_resistance"] - contexto["price_1m"]) / contexto["atr"]
-            st.metric("Liquidez arriba (ATR)", round(dist_up_atr, 2))
-            if dist_up_atr < 0.7:
-                st.error("Liquidez MUY cercana arriba → probable sweep alcista")
-            elif dist_up_atr < 1.2:
-                st.warning("Zona de riesgo arriba")
-            else:
-                st.success("Espacio limpio arriba")
-
-    with col2:
-        if liquidity["nearest_support"] is None:
-            st.metric("Liquidez abajo (ATR)", "∞")
-            st.success("No existe liquidez por debajo → price discovery bajista")
-        else:
-            dist_down_atr = (contexto["price_1m"] - liquidity["nearest_support"]) / contexto["atr"]
-            st.metric("Liquidez abajo (ATR)", round(dist_down_atr, 2))
-            if dist_down_atr < 0.7:
-                st.error("Liquidez MUY cercana abajo → probable sweep bajista")
-            elif dist_down_atr < 1.2:
-                st.warning("Zona de riesgo abajo")
-            else:
-                st.success("Espacio limpio abajo")
-
-    st.markdown("### 🧲 Intención Probable del Mercado")
-    if liquidity["liquidity_attraction"] == "UP":
-        st.info("El mercado probablemente buscará stops de SHORTS primero")
-    elif liquidity["liquidity_attraction"] == "DOWN":
-        st.info("El mercado probablemente buscará stops de LONGS primero")
-    else:
-        st.write("No hay sesgo claro de liquidez")
-
-    st.markdown("### 🧱 Fuerza Estructural")
-    if liquidity["resistance_zones"]:
-        st.write("🔴 Resistencias institucionales:")
-        for zmin, zmax in liquidity["resistance_zones"]:
-            distancia = ((zmin - contexto["price_1m"]) / contexto["price_1m"]) * 100
-            st.error(f"Zona: {round(zmin, 2)} → {round(zmax, 2)} | Distancia: {round(distancia, 3)}%")
-    else:
-        st.success("No hay resistencias institucionales cercanas")
-
-    if liquidity["support_zones"]:
-        st.write("🟢 Soportes institucionales:")
-        for zmin, zmax in liquidity["support_zones"]:
-            distancia = ((contexto["price_1m"] - zmax) / contexto["price_1m"]) * 100
-            st.success(f"Zona: {round(zmin, 2)} → {round(zmax, 2)} | Distancia: {round(distancia, 3)}%")
-    else:
-        st.success("No hay soportes institucionales cercanos")
-
-    st.markdown("### ⚠ Riesgo de Liquidez")
-    st.metric("Market Structure Risk", f"{liquidity['market_lrs']:.1f}/80")
-
-    if liquidity["market_lrs"] < 20:
-        st.success("Bajo riesgo de barrida")
-    elif liquidity["market_lrs"] < 40:
-        st.info("Riesgo moderado")
-    elif liquidity["market_lrs"] < 60:
-        st.warning("Alto riesgo")
-    else:
-        st.error("Muy alto riesgo")
-
-    st.markdown("### 🧠 Estado Operativo del Mercado")
-    if liquidity["market_clean"]:
-        st.success("Mercado relativamente limpio → continuidad posible")
-    else:
-        st.error("Mercado sucio → alta probabilidad de barrida antes de continuar")
-
+    render_liquidity_tab(contexto, liquidity)
 # ============================================================
 # TAB 3 - VALIDACIÓN MTF
 # ============================================================
