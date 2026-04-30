@@ -155,6 +155,8 @@ from views.sidebar import (
 from views.backend_monitor_view import render_backend_monitor_tab
 from views.context_view import render_context_tab
 from views.liquidity_view import render_liquidity_tab
+from views.mtf_view import render_mtf_tab
+from views.backtest_view import render_backtest_tab
 # ============================================================
 # STREAMLIT PAGE
 # ============================================================
@@ -665,49 +667,17 @@ with tab1:
 # ============================================================
 with tab2:
     render_liquidity_tab(contexto, liquidity)
+
 # ============================================================
 # TAB 3 - VALIDACIÓN MTF
 # ============================================================
 with tab3:
-    st.subheader("🧠 Validación MTF")
-
-    for direccion in ["LONG", "SHORT"]:
-        st.markdown(f"## {direccion}")
-        mtf_valido, detalle = evaluar_mtf(direccion, df_1h, df_15m, df_5m, df_1m)
-
-        if mtf_valido:
-            st.success(f"{direccion} VÁLIDO")
-        else:
-            st.error(f"{direccion} INVÁLIDO")
-
-        ema9_5m = df_5m["ema9"].iloc[-1]
-        ema20_5m = df_5m["ema20"].iloc[-1]
-        ema50_5m = df_5m["ema50"].iloc[-1]
-        price5m = df_5m["close"].iloc[-1]
-
-        emas_ok, d1, d2 = emas_abiertas_5m(
-            direccion,
-            ema9_5m,
-            ema20_5m,
-            ema50_5m,
-            price5m
-        )
-
-        ca, cb, cc = st.columns(3)
-        ca.metric("EMA9-EMA20 distancia", f"{d1 * 100:.3f}%")
-        cb.metric("EMA20-EMA50 distancia", f"{d2 * 100:.3f}%")
-        cc.metric("EMAs abiertas", "SI" if emas_ok else "NO")
-
-        for tf, (valido_tf, checks) in detalle.items():
-            st.subheader(f"{tf} ({'VÁLIDO' if valido_tf else 'INVÁLIDO'})")
-            for c in checks:
-                if c["ok"]:
-                    st.success(f"✔ {c['texto']} : {c['valor']}")
-                else:
-                    st.error(f"✖ {c['texto']} : {c['valor']}")
-
-        st.markdown("---")
-
+    render_mtf_tab(
+        df_1m=df_1m,
+        df_5m=df_5m,
+        df_15m=df_15m,
+        df_1h=df_1h,
+    )
 # ============================================================
 # TAB 4 - EVALUADOR DE TRADE
 # ============================================================
@@ -1139,30 +1109,4 @@ La velocidad reciente del precio va en contra de la dirección elegida.
 # TAB 5 - BACKTEST / HISTÓRICO
 # ============================================================
 with tab5:
-    st.subheader("Backtest rápido 1M")
-
-    wins_l, losses_l, winrate_l, final_capital_l = backtest(df_1m, "long")
-    wins_s, losses_s, winrate_s, final_capital_s = backtest(df_1m, "short")
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("### LONG")
-        st.write("Wins:", wins_l)
-        st.write("Losses:", losses_l)
-        st.write("Winrate:", round(winrate_l, 2), "%")
-        st.write("Capital final simulado:", round(final_capital_l, 2))
-
-    with c2:
-        st.markdown("### SHORT")
-        st.write("Wins:", wins_s)
-        st.write("Losses:", losses_s)
-        st.write("Winrate:", round(winrate_s, 2), "%")
-        st.write("Capital final simulado:", round(final_capital_s, 2))
-
-    st.markdown("---")
-    st.subheader("Probabilidad histórica por condiciones similares")
-    hist_long = probabilidad_historica(df_1m, "LONG")
-    hist_short = probabilidad_historica(df_1m, "SHORT")
-
-    st.write(f"LONG histórico: {hist_long:.2f}%")
-    st.write(f"SHORT histórico: {hist_short:.2f}%")
+    render_backtest_tab(df_1m)
