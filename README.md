@@ -6,7 +6,14 @@ Esta API es una **Validation Layer** para un sistema de trading algorítmico bas
 
 Su objetivo principal es recibir señales generadas por Pine Script, normalizarlas, fusionar eventos complementarios, enriquecerlas con datos de mercado externos, validar entradas operativas y persistir información completa para análisis, dashboard, métricas y futuros modelos de Machine Learning.
 
-El flujo general es:
+El sistema queda dividido en dos aplicaciones principales:
+
+```text
+1. Backend FastAPI / Validation Layer
+2. Panel Streamlit / UI Layer
+```
+
+Flujo general:
 
 ```text
 TradingView Pine Script
@@ -21,7 +28,7 @@ Validación de entradas con Binance + scoring + probabilidad TP/SL
         ↓
 Supabase + Memoria local + Telegram
         ↓
-Dashboard / Streamlit / Análisis histórico / ML futuro
+Panel Streamlit / Dashboard / Análisis histórico / ML futuro
 ```
 
 Esta API no reemplaza la lógica de Pine Script. La API actúa como una capa posterior de validación, persistencia y enriquecimiento.
@@ -30,11 +37,12 @@ Esta API no reemplaza la lógica de Pine Script. La API actúa como una capa pos
 
 ## 2. Responsabilidades del sistema
 
-El sistema está dividido en dos grandes responsabilidades:
+El sistema está dividido en tres grandes responsabilidades:
 
 ```text
 1. TradingView / Pine Script
 2. Backend FastAPI / Validation Layer
+3. Panel Streamlit / UI Layer
 ```
 
 ---
@@ -732,9 +740,9 @@ run_validation()
 
 ---
 
-## 8. Capas de la aplicación
+## 8. Capas de la aplicación Backend
 
-La aplicación quedó dividida en capas siguiendo un patrón modular.
+La aplicación backend quedó dividida en capas siguiendo un patrón modular.
 
 ```text
 API Layer
@@ -747,7 +755,7 @@ External Integrations
 
 ---
 
-## 9. Patrón aplicado en la refactorización
+## 9. Patrón aplicado en la refactorización del Backend
 
 El patrón aplicado es:
 
@@ -799,237 +807,610 @@ backend/
 
 ---
 
-## 10. Objetivo de la refactorización
+## 10. UI Layer / Panel Streamlit
 
-La refactorización tuvo como objetivo dividir un archivo monolítico `index.py` de más de 2000 líneas en módulos mantenibles.
+Además del backend, el sistema cuenta con un **Panel Streamlit** que actúa como capa visual para consultar, interpretar y monitorear las alertas, validaciones y estados persistidos.
 
-### Reglas aplicadas
+El patrón aplicado al panel es equivalente al del backend, pero adaptado a una aplicación visual:
 
 ```text
-- No quitar lógica
-- No simplificar comportamiento
-- No optimizar cambiando reglas
-- No alterar endpoints existentes
-- Separar responsabilidades por archivo
-- Mantener compatibilidad con Vercel
-- Mantener compatibilidad con TradingView
-- Mantener Supabase
-- Mantener Telegram
-- Mantener validación Binance
+UI Layer → Services Layer → Clients / Repositories Layer → Utils / Config
+```
+
+Equivalencia conceptual con el backend:
+
+```text
+Backend routes.py        → Streamlit views/pages
+Backend services/*.py    → Streamlit services/*.py
+Backend repositories/*.py → Streamlit clients/*.py / repositories/*.py
+Backend core/*.py        → Streamlit core/*.py
+Backend utils/*.py       → Streamlit utils/*.py
 ```
 
 ---
 
-## 11. Fases de la refactorización
+## 11. Responsabilidad general del Panel Streamlit
 
-### Fase 1 — Core y utilidades base
+El panel de Streamlit no debe contener lógica pesada ni lógica de negocio mezclada con visualización.
 
-Se extrajeron:
+Su responsabilidad es:
+
+```text
+- Consultar endpoints del backend
+- Mostrar última alerta recibida
+- Mostrar última validación
+- Mostrar histórico local
+- Mostrar histórico desde Supabase
+- Mostrar market_snapshot
+- Mostrar structure_snapshot
+- Mostrar validation_steps
+- Mostrar analysis_trace
+- Mostrar analysis_summary
+- Mostrar estado del setup
+- Mostrar métricas visuales
+- Facilitar debugging operativo
+- Servir como dashboard para monitoreo del sistema
+```
+
+---
+
+## 12. Patrón aplicado en el Panel Streamlit
+
+El patrón recomendado para el panel es:
+
+```text
+app.py
+        ↓
+views/
+        ↓
+services/
+        ↓
+clients/
+        ↓
+backend FastAPI
+```
+
+Flujo conceptual:
+
+```text
+Streamlit app.py
+        ↓
+views/sidebar.py
+        ↓
+clients/backend_client.py
+        ↓
+FastAPI Backend
+        ↓
+Respuesta JSON
+        ↓
+services/*
+        ↓
+components/*
+        ↓
+Streamlit UI
+```
+
+Ejemplo concreto:
+
+```text
+GET /api/validation/latest
+        ↓
+backend_client.get_latest_validation()
+        ↓
+validation_service.extract_validation_summary()
+        ↓
+validation_view.render_latest_validation()
+        ↓
+components.cards.render_metric_card()
+```
+
+---
+
+## 13. Estructura propuesta para el Panel Streamlit
+
+```text
+streamlit_app/
+│
+├── app.py
+│
+├── core/
+│   ├── __init__.py
+│   ├── config.py
+│   ├── constants.py
+│   └── session_state.py
+│
+├── clients/
+│   ├── __init__.py
+│   ├── backend_client.py
+│   └── supabase_client.py
+│
+├── services/
+│   ├── __init__.py
+│   ├── alert_service.py
+│   ├── validation_service.py
+│   ├── market_snapshot_service.py
+│   ├── metrics_service.py
+│   └── formatting_service.py
+│
+├── views/
+│   ├── __init__.py
+│   ├── sidebar.py
+│   ├── latest_alert_view.py
+│   ├── validation_view.py
+│   ├── alerts_history_view.py
+│   ├── supabase_history_view.py
+│   ├── market_snapshot_view.py
+│   ├── technical_context_view.py
+│   └── setup_detail_view.py
+│
+├── components/
+│   ├── __init__.py
+│   ├── cards.py
+│   ├── tables.py
+│   ├── badges.py
+│   └── charts.py
+│
+├── utils/
+│   ├── __init__.py
+│   ├── json_utils.py
+│   ├── time_utils.py
+│   └── dataframe_utils.py
+│
+└── requirements.txt
+```
+
+---
+
+## 14. Función de cada capa del Panel Streamlit
+
+### 14.1 `app.py`
+
+Archivo principal de Streamlit.
+
+Responsabilidad:
+
+```text
+- Configurar la página Streamlit
+- Definir layout global
+- Cargar configuración
+- Renderizar sidebar
+- Orquestar las vistas principales
+- Controlar refresh
+- No contener lógica pesada
+- No hacer requests HTTP directamente si puede delegarlo a clients/
+```
+
+Ejemplo de responsabilidad:
+
+```text
+Configurar página
+Renderizar sidebar
+Renderizar últimas alertas
+Renderizar validación
+Renderizar histórico
+Renderizar secciones técnicas
+```
+
+---
+
+### 14.2 `core/`
+
+Capa de configuración y estado.
+
+Responsabilidad:
+
+```text
+- Definir BACKEND_BASE_URL
+- Definir URLs del backend
+- Definir valores por defecto del dashboard
+- Definir constantes visuales
+- Gestionar session_state
+- Centralizar configuración reutilizable
+```
+
+Archivos sugeridos:
 
 ```text
 core/config.py
-core/state.py
-core/logging.py
-core/security.py
-utils/time_utils.py
-utils/json_utils.py
-utils/math_utils.py
+core/constants.py
+core/session_state.py
 ```
 
-Responsabilidad:
+Ejemplo:
 
-```text
-- Variables de entorno
-- Estado global
-- Logging JSON
-- Seguridad webhook
-- Fechas UTC
-- Sanitización JSON
-- Funciones matemáticas auxiliares
+```python
+import os
+
+BACKEND_BASE_URL = os.getenv(
+    "BACKEND_BASE_URL",
+    "https://alertas-tdv-67cu-two.vercel.app"
+)
+
+BACKEND_LATEST_URL = f"{BACKEND_BASE_URL}/api/latest"
+BACKEND_ALERTS_URL = f"{BACKEND_BASE_URL}/api/alerts"
+BACKEND_VALIDATION_URL = f"{BACKEND_BASE_URL}/api/validation/latest"
+BACKEND_SUPABASE_ALERTS_URL = f"{BACKEND_BASE_URL}/api/alerts/supabase"
+BACKEND_SUPABASE_SETUPS_URL = f"{BACKEND_BASE_URL}/api/setups/supabase"
 ```
 
 ---
 
-### Fase 2 — Servicio de alertas
+### 14.3 `clients/`
 
-Archivo:
+Capa de comunicación externa.
+
+Responsabilidad:
+
+```text
+- Hacer requests HTTP al backend
+- Manejar timeouts
+- Manejar errores HTTP
+- Devolver JSON crudo o estructura segura
+- No renderizar componentes Streamlit
+- No calcular métricas visuales
+```
+
+Archivo principal:
+
+```text
+clients/backend_client.py
+```
+
+Funciones esperadas:
+
+```text
+get_latest_alert()
+get_latest_validation()
+get_alerts_history()
+get_supabase_alerts()
+get_supabase_setups()
+health_backend()
+health_binance()
+health_supabase()
+```
+
+Responsabilidad opcional de `clients/supabase_client.py`:
+
+```text
+- Leer Supabase directamente si en el futuro el panel decide no pasar por la API
+- Mantener la opción desacoplada del backend
+```
+
+---
+
+### 14.4 `services/`
+
+Capa de transformación y lógica visual.
+
+Responsabilidad:
+
+```text
+- Transformar respuestas crudas del backend
+- Extraer validation_steps
+- Extraer market_snapshot
+- Extraer structure_snapshot
+- Preparar DataFrames para tablas
+- Calcular KPIs visuales del dashboard
+- Clasificar estados OK / KO / WARNING
+- Preparar datos para charts
+- Formatear valores numéricos
+```
+
+Archivos sugeridos:
 
 ```text
 services/alert_service.py
-```
-
-Responsabilidad:
-
-```text
-- parse_payload
-- ensure_canonical_schema
-- assemble_event_payload
-- should_validate_payload
-- normalize_alert
-- build_history_item
-- merge_core_extra_payloads
-- assemble_core_extra_by_event_uid
-```
-
----
-
-### Fase 3 — Binance y features de mercado
-
-Archivos:
-
-```text
-services/binance_service.py
-services/market_features_service.py
-```
-
-Responsabilidad:
-
-```text
-- Consultar klines
-- Consultar depth
-- Consultar aggTrades
-- Convertir klines a DataFrame
-- Calcular EMA
-- Calcular ATR
-- Calcular ADX / DI
-- Calcular VWAP
-- Calcular features de vela
-- Detectar swings
-- Analizar order book
-- Analizar flujo de trades
-```
-
----
-
-### Fase 4 — Scoring y probabilidad
-
-Archivos:
-
-```text
-services/scoring_service.py
-services/probability_service.py
-```
-
-Responsabilidad:
-
-```text
-- Calcular score externo
-- Evaluar contexto HTF
-- Evaluar EMA / ADX / DI
-- Evaluar VWAP
-- Evaluar volumen
-- Evaluar order book
-- Evaluar flujo
-- Evaluar liquidez
-- Evaluar room hacia TP
-- Calcular probabilidad TP antes SL
-- Integrar modelo sklearn opcional
-```
-
----
-
-### Fase 5 — Validation Service
-
-Archivo:
-
-```text
 services/validation_service.py
+services/market_snapshot_service.py
+services/metrics_service.py
+services/formatting_service.py
 ```
+
+Ejemplos de responsabilidades por archivo:
+
+```text
+alert_service.py:
+- Extraer event, side, symbol, price, phase, regime
+- Preparar resumen de última alerta
+- Preparar historial de alertas
+
+validation_service.py:
+- Extraer approve, confidence, probability, score
+- Preparar validation_steps como tabla
+- Preparar analysis_trace y summary
+
+market_snapshot_service.py:
+- Extraer close, EMA, ADX, DI, VWAP, RVOL
+- Preparar métricas de order book y flow
+
+metrics_service.py:
+- Calcular conteos de alertas
+- Calcular aprobadas/rechazadas
+- Calcular distribución por side/event/status
+
+formatting_service.py:
+- Formatear porcentajes
+- Formatear precios
+- Formatear booleanos
+- Formatear estados visuales
+```
+
+---
+
+### 14.5 `views/`
+
+Capa visual de secciones del dashboard.
 
 Responsabilidad:
 
 ```text
-- Ejecutar validación completa
-- Omitir validación para eventos no-entry
-- Crear validation_steps
-- Crear analysis_trace
-- Crear analysis_summary
-- Calcular aprobación final
-- Devolver normalized_alert
-- Devolver market_snapshot
-- Devolver structure_snapshot
-- Devolver alert_reused
+- Renderizar pantallas Streamlit
+- Organizar columnas, tabs y secciones
+- Llamar clients/ para obtener datos
+- Llamar services/ para preparar datos
+- Llamar components/ para mostrar UI
+- No contener lógica de negocio pesada
+```
+
+Archivos sugeridos:
+
+```text
+views/sidebar.py
+views/latest_alert_view.py
+views/validation_view.py
+views/alerts_history_view.py
+views/supabase_history_view.py
+views/market_snapshot_view.py
+views/technical_context_view.py
+views/setup_detail_view.py
+```
+
+Responsabilidad por vista:
+
+```text
+sidebar.py:
+- Auto refresh
+- Selector de backend URL
+- Botón de recarga
+- Parámetros visuales
+
+latest_alert_view.py:
+- Mostrar última alerta recibida
+- Mostrar payload resumido
+- Mostrar JSON expandible
+
+validation_view.py:
+- Mostrar última validación
+- Mostrar approve/confidence/probability/score
+- Mostrar validation_steps
+- Mostrar razones y penalizaciones
+
+alerts_history_view.py:
+- Mostrar historial en memoria desde /api/alerts
+
+supabase_history_view.py:
+- Mostrar histórico persistido desde /api/alerts/supabase
+- Mostrar setups desde /api/setups/supabase
+
+market_snapshot_view.py:
+- Mostrar datos de mercado usados en validación
+- Mostrar order book / flow / indicadores
+
+technical_context_view.py:
+- Mostrar contexto Pine: regime, phase, HTF, movement, liquidity
+
+setup_detail_view.py:
+- Mostrar detalle de un setup seleccionado
 ```
 
 ---
 
-### Fase 6 — Rutas API
+### 14.6 `components/`
 
-Archivo:
-
-```text
-app/api/routes.py
-```
+Capa de componentes visuales reutilizables.
 
 Responsabilidad:
 
 ```text
-- Healthcheck
-- Latest alert
-- Latest validation
-- Webhook TradingView
-- Validate manual
-- Alert history
-- Supabase history
-- Supabase health
-- Binance health
+- Cards
+- Badges
+- Métricas
+- Tablas
+- Gráficos
+- Expansores JSON
+- Componentes de estado
+```
+
+Archivos sugeridos:
+
+```text
+components/cards.py
+components/tables.py
+components/badges.py
+components/charts.py
+```
+
+Ejemplos:
+
+```text
+cards.py:
+- render_metric_card()
+- render_status_card()
+- render_validation_card()
+
+badges.py:
+- render_ok_badge()
+- render_ko_badge()
+- render_warning_badge()
+- render_side_badge()
+
+tables.py:
+- render_dataframe()
+- render_validation_steps_table()
+- render_alerts_table()
+
+charts.py:
+- render_probability_chart()
+- render_score_distribution()
+- render_alerts_by_event()
 ```
 
 ---
 
-### Fase 7 — Telegram y Supabase
+### 14.7 `utils/`
 
-Archivos:
-
-```text
-services/telegram_service.py
-repositories/supabase_repo.py
-```
-
-Responsabilidad Telegram:
-
-```text
-- Construir mensaje ENTRY VALIDADA OK
-- Enviar mensaje a Telegram
-- Loguear éxito o error
-```
-
-Responsabilidad Supabase:
-
-```text
-- Inicializar cliente Supabase
-- Filtrar payloads persistibles
-- Guardar alert_events
-- Actualizar trade_setups
-- Guardar validation_results
-- Leer histórico de alertas
-- Leer setups
-```
-
----
-
-### Fase 8 — Main final y wrapper Vercel
-
-Archivos:
-
-```text
-app/main.py
-api/index.py
-vercel.json
-```
+Capa auxiliar.
 
 Responsabilidad:
 
 ```text
-- Crear FastAPI app
-- Configurar CORS
-- Incluir router
-- Exponer app para Vercel
+- Helpers de JSON
+- Helpers de DataFrame
+- Conversión de fechas
+- Safe get
+- Safe float
+- Limpieza de valores nulos
+- Funciones reutilizables sin dependencia directa de Streamlit
+```
+
+Archivos sugeridos:
+
+```text
+utils/json_utils.py
+utils/time_utils.py
+utils/dataframe_utils.py
 ```
 
 ---
 
-## 12. Estructura final del proyecto
+## 15. Fases recomendadas para refactorizar el Panel Streamlit
+
+### Fase 1 — Base modular
+
+Crear:
+
+```text
+core/config.py
+core/session_state.py
+utils/json_utils.py
+utils/dataframe_utils.py
+```
+
+Objetivo:
+
+```text
+Centralizar configuración, helpers y estado.
+```
+
+---
+
+### Fase 2 — Backend client
+
+Extraer todas las llamadas `requests.get()` o `requests.post()` a:
+
+```text
+clients/backend_client.py
+```
+
+Objetivo:
+
+```text
+Que Streamlit no haga llamadas HTTP directamente desde la UI.
+```
+
+---
+
+### Fase 3 — Servicios de transformación
+
+Crear:
+
+```text
+services/alert_service.py
+services/validation_service.py
+services/market_snapshot_service.py
+services/metrics_service.py
+```
+
+Objetivo:
+
+```text
+Separar datos crudos del backend de datos listos para visualizar.
+```
+
+---
+
+### Fase 4 — Componentes visuales
+
+Crear:
+
+```text
+components/cards.py
+components/tables.py
+components/badges.py
+components/charts.py
+```
+
+Objetivo:
+
+```text
+Evitar duplicar st.metric, st.dataframe, st.json, st.columns y estilos.
+```
+
+---
+
+### Fase 5 — Vistas
+
+Crear:
+
+```text
+views/sidebar.py
+views/latest_alert_view.py
+views/validation_view.py
+views/alerts_history_view.py
+views/supabase_history_view.py
+views/market_snapshot_view.py
+```
+
+Objetivo:
+
+```text
+Cada bloque visual del dashboard queda aislado y mantenible.
+```
+
+---
+
+### Fase 6 — `app.py` limpio
+
+Dejar `app.py` solo como orquestador:
+
+```text
+- Configurar página
+- Renderizar sidebar
+- Renderizar vistas
+- Controlar refresh
+```
+
+---
+
+## 16. Objetivo de la refactorización del Panel Streamlit
+
+El objetivo es evitar que el panel crezca como un archivo monolítico.
+
+Reglas:
+
+```text
+- No quitar visualizaciones
+- No cambiar endpoints
+- No eliminar lógica existente
+- No mezclar requests con UI
+- No mezclar transformación de datos con renderizado
+- Mantener compatibilidad con el backend actual
+- Mantener el panel como herramienta de monitoreo operativo
+```
+
+---
+
+## 17. Estructura final del proyecto Backend
 
 ```text
 backend/
@@ -1078,605 +1459,7 @@ backend/
 
 ---
 
-## 13. Función de cada capa
-
-### 13.1 API Layer
-
-Ubicación:
-
-```text
-app/api/routes.py
-```
-
-Responsabilidad:
-
-```text
-- Recibir requests HTTP
-- Exponer endpoints
-- Delegar lógica a servicios
-- No contener lógica pesada
-```
-
-Endpoints:
-
-```text
-GET  /
-GET  /api/latest
-GET  /api/validation/latest
-GET  /api/alerts
-GET  /api/health/binance
-GET  /api/health/supabase
-GET  /api/alerts/supabase
-GET  /api/setups/supabase
-POST /api/webhook
-POST /api/validate
-POST /
-```
-
----
-
-### 13.2 Core Layer
-
-Ubicación:
-
-```text
-app/core/
-```
-
-Responsabilidad:
-
-```text
-- Configuración
-- Estado global
-- Logging
-- Seguridad
-```
-
-Archivos:
-
-```text
-config.py
-state.py
-logging.py
-security.py
-```
-
----
-
-### 13.3 Service Layer
-
-Ubicación:
-
-```text
-app/services/
-```
-
-Responsabilidad:
-
-```text
-- Lógica de negocio
-- Normalización
-- Validación
-- Scoring
-- Probabilidad
-- Features de mercado
-- Integraciones externas funcionales
-```
-
-Archivos principales:
-
-```text
-alert_service.py
-binance_service.py
-market_features_service.py
-scoring_service.py
-probability_service.py
-validation_service.py
-telegram_service.py
-```
-
----
-
-### 13.4 Repository Layer
-
-Ubicación:
-
-```text
-app/repositories/
-```
-
-Responsabilidad:
-
-```text
-- Acceso a base de datos
-- Persistencia Supabase
-- Lectura de histórico
-- Upserts e inserts
-```
-
-Archivo:
-
-```text
-supabase_repo.py
-```
-
----
-
-### 13.5 Utils Layer
-
-Ubicación:
-
-```text
-app/utils/
-```
-
-Responsabilidad:
-
-```text
-- Funciones auxiliares reutilizables
-- Sanitización JSON
-- Fechas
-- Conversión numérica
-- Helpers matemáticos
-```
-
-Archivos:
-
-```text
-time_utils.py
-json_utils.py
-math_utils.py
-```
-
----
-
-## 14. Validation Layer
-
-La Validation Layer es la parte central del backend.
-
-Su función es decidir si una entrada enviada por TradingView merece ser aprobada o rechazada.
-
-### La Validation Layer usa
-
-```text
-- Payload recibido desde Pine Script
-- Datos de Binance 1m
-- Datos de Binance 5m
-- Order book
-- AggTrades
-- Indicadores backend
-- Scoring externo
-- Probabilidad TP antes que SL
-- Reglas de extensión / late trend
-- Espacio estructural hacia TP
-```
-
----
-
-## 15. Eventos que se validan completamente
-
-Actualmente la validación completa se ejecuta para:
-
-```text
-LONG_ENTRY
-SHORT_ENTRY
-REAL_LONG_ENTRY
-REAL_SHORT_ENTRY
-```
-
-Eventos como:
-
-```text
-LONG_INIT
-SHORT_INIT
-IMP_UP_AFTER_ADAPTIVE
-IMP_DN_AFTER_ADAPTIVE
-```
-
-se reciben, se normalizan y se pueden persistir, pero no ejecutan validación completa de entrada.
-
-Esto es intencional porque INIT representa señal temprana o potencial, no entrada final.
-
----
-
-## 16. Persistencia de INIT
-
-La persistencia fue ajustada para no perder INIT.
-
-Ahora se permite guardar:
-
-```text
-LONG_INIT
-SHORT_INIT
-LONG_INIT_AFTER_ADAPTIVE
-SHORT_INIT_AFTER_ADAPTIVE
-IMP_UP_AFTER_ADAPTIVE
-IMP_DN_AFTER_ADAPTIVE
-LONG_ENTRY
-SHORT_ENTRY
-REAL_LONG_ENTRY
-REAL_SHORT_ENTRY
-REAL_LONG_EXIT
-REAL_SHORT_EXIT
-EXECUTED_EXIT
-LONG_CANCEL
-SHORT_CANCEL
-CANCEL
-```
-
-Esto permite construir dataset histórico aunque la señal no esté aprobada.
-
----
-
-## 17. Lifecycle de eventos
-
-El backend asigna un estado lógico a cada evento.
-
-```text
-WATCH          → señal observada
-ARMED          → señal armada
-INIT_RECEIVED  → INIT recibida, pero no aprobada como entrada
-VALIDATED      → señal aprobada
-REJECTED       → señal rechazada
-ENTRY_PENDING  → entrada pendiente de validación
-OPEN           → operación real abierta
-CLOSED         → operación cerrada
-CANCELLED      → setup cancelado
-```
-
----
-
-## 18. Flujo del dato completo
-
-### Paso 1 — Pine Script detecta señal
-
-TradingView detecta una señal como:
-
-```text
-LONG_INIT
-SHORT_INIT
-LONG_ENTRY
-SHORT_ENTRY
-REAL_LONG_ENTRY
-REAL_LONG_EXIT
-```
-
-### Paso 2 — Pine Script construye JSON
-
-El script genera un JSON con:
-
-```text
-source
-signal
-context
-trigger
-quality
-trade_plan
-movement
-liquidity
-structure
-setup_timing
-setup_validation
-setup_context
-sequence
-htf_context
-execution
-```
-
-### Paso 3 — TradingView envía alerta
-
-TradingView envía la alerta al endpoint:
-
-```http
-POST /api/webhook
-```
-
-### Paso 4 — FastAPI recibe alerta
-
-La API ejecuta:
-
-```text
-validate_secret()
-parse_payload()
-assemble_event_payload()
-assemble_core_extra_by_event_uid()
-```
-
-### Paso 5 — Merge CORE + EXTRA
-
-Si la alerta llega en dos partes:
-
-```text
-logical_event_core
-logical_event_extra
-```
-
-el backend espera ambas y las fusiona en:
-
-```text
-logical_event_full
-```
-
-Esto evita guardar señales incompletas.
-
-### Paso 6 — Actualización de memoria local
-
-El backend actualiza:
-
-```text
-LAST_ALERT
-LAST_VALIDATION
-ALERT_HISTORY
-```
-
-Esto permite consultar:
-
-```http
-GET /api/latest
-GET /api/validation/latest
-GET /api/alerts
-```
-
-### Paso 7 — Respuesta rápida al webhook
-
-El backend responde rápido a TradingView:
-
-```json
-{
-  "ok": true,
-  "message": "Alert received quickly. Validation, Supabase and Telegram queued in background."
-}
-```
-
-### Paso 8 — Background task
-
-Después de responder a TradingView, se ejecuta en background:
-
-```text
-process_alert_background()
-```
-
-Responsabilidades:
-
-```text
-- Validar si aplica
-- Persistir en Supabase
-- Enviar Telegram si la entrada es aprobada
-- Actualizar LAST_ALERT con resultado final
-```
-
-### Paso 9 — Validación de entrada
-
-Si el evento es entrada:
-
-```text
-LONG_ENTRY
-SHORT_ENTRY
-REAL_LONG_ENTRY
-REAL_SHORT_ENTRY
-```
-
-se ejecuta:
-
-```text
-run_validation()
-```
-
-### Paso 10 — Recolección de mercado
-
-La API consulta Binance:
-
-```text
-GET /api/v3/klines 1m
-GET /api/v3/klines 5m
-GET /api/v3/depth
-GET /api/v3/aggTrades
-```
-
-### Paso 11 — Features backend
-
-El backend calcula:
-
-```text
-EMA20
-EMA50
-EMA200
-ATR14
-ADX
-+DI
--DI
-VWAP
-RVOL20
-Body %
-Wicks
-Returns
-Impulse ATR
-Compression ratio
-Swing high / swing low
-Order book imbalance
-Spread bps
-Bid wall
-Ask wall
-Vacuum above / below
-Buy aggression
-Sell aggression
-Delta qty
-```
-
-### Paso 12 — Scoring externo
-
-El backend calcula un score externo usando:
-
-```text
-Trigger
-Quality alert
-HTF alignment
-EMA trend
-ADX / DI
-VWAP
-RVOL
-Flow
-Order book
-Liquidity
-Extension
-TP room
-```
-
-Resultado:
-
-```json
-{
-  "score_external": 72.5,
-  "reasons": [],
-  "penalties": [],
-  "backend_feature_pack": {}
-}
-```
-
-### Paso 13 — Probabilidad TP antes SL
-
-El backend calcula:
-
-```text
-probability_tp_before_sl
-barrier_component
-technical_component
-ml_component
-mu_per_bar
-sigma_per_bar
-```
-
-Modelo usado:
-
-```text
-hybrid_barrier_logit
-```
-
-Si hay modelo sklearn cargado:
-
-```text
-hybrid_barrier_logit_sklearn
-```
-
-### Paso 14 — Validation Steps
-
-Se generan pasos explícitos:
-
-```text
-event_gate
-context_validation
-microstructure_validation
-flow_validation
-tp_room_validation
-extension_validation
-tp_probability_validation
-score_validation
-```
-
-Cada paso tiene:
-
-```json
-{
-  "ok": true,
-  "status": "OK",
-  "reason": "...",
-  "details": {}
-}
-```
-
-### Paso 15 — Decisión final
-
-La entrada se aprueba si:
-
-```text
-probability_tp_before_sl >= VALIDATION_THRESHOLD
-score_external >= MIN_SCORE_THRESHOLD
-too_extended_block_alert == false
-```
-
-Variables de entorno:
-
-```text
-VALIDATION_THRESHOLD=0.62
-MIN_SCORE_THRESHOLD=55
-```
-
-### Paso 16 — Resultado de validación
-
-La respuesta incluye:
-
-```text
-approve
-confidence
-side
-symbol
-event
-entry_price
-tp
-sl
-rr
-probability_tp_before_sl
-probability_model
-barrier_component
-technical_component
-ml_component
-score_external
-quality_score_alert
-reason
-penalties
-validation_steps
-analysis_trace
-analysis_summary
-market_snapshot
-structure_snapshot
-alert_reused
-normalized_alert
-```
-
-### Paso 17 — Persistencia en Supabase
-
-Se guarda en:
-
-```text
-alert_events
-trade_setups
-validation_results
-```
-
-### Paso 18 — Telegram
-
-Si:
-
-```text
-validation.approve == true
-```
-
-se envía mensaje Telegram:
-
-```text
-ENTRY VALIDADA OK
-```
-
-con:
-
-```text
-symbol
-side
-event
-entry
-tp
-sl
-rr
-confidence
-probabilidad
-score
-razones
-penalizaciones
-```
-
----
-
-## 19. Endpoints disponibles
+## 18. Endpoints disponibles
 
 ### Health principal
 
@@ -1760,11 +1543,11 @@ Lee setups guardados en Supabase.
 
 ---
 
-## 20. Variables de entorno
+## 19. Variables de entorno
 
 Crear estas variables tanto en local como en Vercel.
 
-### 20.1 Seguridad del webhook
+### 19.1 Seguridad del webhook
 
 ```env
 WEBHOOK_SECRET=MI_SECRET
@@ -1786,7 +1569,7 @@ x-webhook-secret: MI_SECRET
 
 ---
 
-### 20.2 Validación
+### 19.2 Validación
 
 ```env
 VALIDATION_THRESHOLD=0.62
@@ -1813,7 +1596,7 @@ VALIDATION_MODEL_VERSION:
 
 ---
 
-### 20.3 Supabase
+### 19.3 Supabase
 
 ```env
 SUPABASE_URL=https://xxxxx.supabase.co
@@ -1841,7 +1624,7 @@ validation_results
 
 ---
 
-### 20.4 Telegram
+### 19.4 Telegram
 
 ```env
 TELEGRAM_ENABLED=false
@@ -1871,7 +1654,7 @@ validation.approve == true
 
 ---
 
-### 20.5 Machine Learning opcional
+### 19.5 Machine Learning opcional
 
 ```env
 ML_MODEL_PATH=
@@ -1902,7 +1685,7 @@ hybrid_barrier_logit_sklearn
 
 ---
 
-### 20.6 CORS
+### 19.6 CORS
 
 ```env
 ALLOWED_ORIGINS=*
@@ -1924,7 +1707,7 @@ ALLOWED_ORIGINS=https://mi-dashboard.vercel.app,https://mi-streamlit-app.streaml
 
 ---
 
-### 20.7 Ejemplo `.env` local
+### 19.7 Ejemplo `.env` local
 
 ```env
 WEBHOOK_SECRET=MI_SECRET
@@ -1949,7 +1732,7 @@ ALLOWED_ORIGINS=*
 
 ---
 
-### 20.8 Variables a crear en Vercel
+### 19.8 Variables a crear en Vercel
 
 En Vercel:
 
@@ -1998,7 +1781,7 @@ REQUEST_TIMEOUT_SEC
 
 ---
 
-## 21. Compatibilidad con Vercel
+## 20. Compatibilidad con Vercel
 
 La app está preparada para Vercel con:
 
@@ -2035,7 +1818,7 @@ from app.main import app
 
 ---
 
-## 22. Ejecución local
+## 21. Ejecución local Backend
 
 Desde la carpeta `backend`:
 
@@ -2052,7 +1835,7 @@ http://127.0.0.1:8000/
 
 ---
 
-## 23. Pruebas básicas
+## 22. Pruebas básicas Backend
 
 ```bash
 curl http://127.0.0.1:8000/
@@ -2064,11 +1847,33 @@ curl http://127.0.0.1:8000/api/health/supabase
 
 ---
 
+## 23. Ejecución local Panel Streamlit
+
+Desde la carpeta del panel:
+
+```bash
+streamlit run app.py
+```
+
+Variables mínimas del panel:
+
+```env
+BACKEND_BASE_URL=http://127.0.0.1:8000
+```
+
+En producción:
+
+```env
+BACKEND_BASE_URL=https://TU_BACKEND.vercel.app
+```
+
+---
+
 ## 24. Estado final de la refactorización
 
-La refactorización separó un backend monolítico en una arquitectura modular basada en capas.
+La refactorización separó un backend monolítico en una arquitectura modular basada en capas y deja definido el patrón equivalente para el panel Streamlit.
 
-### Resultado
+### Resultado Backend
 
 ```text
 - Backend más mantenible
@@ -2086,9 +1891,22 @@ La refactorización separó un backend monolítico en una arquitectura modular b
 - Compatible con Supabase
 ```
 
+### Resultado esperado Panel Streamlit
+
+```text
+- UI más mantenible
+- Requests aislados en clients/
+- Transformación de datos aislada en services/
+- Renderizado aislado en views/
+- Componentes visuales reutilizables
+- Configuración centralizada
+- Dashboard preparado para crecer
+- Menor riesgo al agregar nuevas visualizaciones
+```
+
 ---
 
-## 25. Commit representativo
+## 25. Commit representativo Backend
 
 ```bash
 git add .
@@ -2097,9 +1915,27 @@ git commit -m "refactor trading validation backend into modular services" -m "Sp
 
 ---
 
-## 26. Resumen ejecutivo
+## 26. Commit representativo Panel Streamlit
 
-Esta API es la capa de validación y persistencia del sistema de trading algorítmico.
+```bash
+git add .
+git commit -m "define modular Streamlit dashboard architecture" -m "Document UI Layer architecture for the trading validation dashboard, separating app orchestration, views, components, services, backend clients, core configuration and utilities."
+```
+
+---
+
+## 27. Resumen ejecutivo
+
+Esta solución está compuesta por:
+
+```text
+TradingView / Pine Script
+Backend FastAPI / Validation Layer
+Panel Streamlit / UI Layer
+Supabase
+Telegram
+Binance
+```
 
 TradingView se encarga de detectar señales, contexto, fases, triggers y setups.
 
@@ -2119,18 +1955,28 @@ El backend se encarga de:
 - Servir datos al dashboard
 ```
 
-La arquitectura final sigue el patrón:
+El panel Streamlit se encarga de:
+
+```text
+- Consultar el backend
+- Mostrar alertas
+- Mostrar validaciones
+- Mostrar histórico
+- Mostrar snapshots técnicos
+- Mostrar métricas
+- Facilitar debugging y monitoreo
+```
+
+La arquitectura backend sigue el patrón:
 
 ```text
 API Layer → Service Layer → Repository Layer
 ```
 
-con capas auxiliares:
+La arquitectura Streamlit sigue el patrón:
 
 ```text
-Core Layer
-Utils Layer
-External Integrations
+UI Layer → Services Layer → Clients / Repositories Layer → Utils / Config
 ```
 
 La validación queda organizada en tres niveles:
@@ -2140,5 +1986,981 @@ Nivel 1: Validación del payload y evento
 Nivel 2: Validación técnica con datos de Pine Script
 Nivel 3: Validación externa con mercado real, score y probabilidad TP/SL
 ```
+## Panel Streamlit — Arquitectura UI y responsabilidades
 
-Esta estructura permite continuar el desarrollo agregando dashboard, ML, LLM explanation, métricas de performance y automatización sin seguir creciendo sobre un único `index.py` monolítico.
+El panel Streamlit es la capa visual operativa del sistema de trading. Su función principal es mostrar, interpretar y organizar la información generada por TradingView, el backend FastAPI, Supabase, Binance y los cálculos locales del propio dashboard.
+
+El panel no reemplaza la lógica de señales de TradingView ni la Validation Layer del backend. Su responsabilidad es actuar como interfaz de análisis, monitoreo y evaluación manual.
+
+---
+
+## Objetivos del panel Streamlit
+
+El panel permite:
+
+1. Visualizar la última alerta recibida desde TradingView.
+2. Consultar la última validación generada por el backend.
+3. Mostrar histórico de alertas persistidas en Supabase.
+4. Analizar contexto de mercado local con datos de Binance.
+5. Evaluar liquidez cercana, zonas institucionales y riesgo de barrida.
+6. Validar condiciones multi-timeframe en 1H, 15M y 5M.
+7. Evaluar manualmente una entrada LONG o SHORT.
+8. Calcular TP, SL, break even, trailing, R:R, riesgo y tamaño de posición.
+9. Estimar probabilidad de alcanzar TP y probabilidad de rentabilidad.
+10. Ejecutar backtest rápido e histórico por condiciones similares.
+
+---
+
+## Patrón aplicado en la refactorización UI
+
+La refactorización del panel aplica un patrón por capas:
+
+App Orchestrator
+↓
+Views
+↓
+Components
+↓
+Services
+↓
+Clients
+↓
+Core / Utils
+
+El objetivo del patrón es separar responsabilidades:
+
+- `app.py` orquesta.
+- `views/` renderiza pantallas.
+- `components/` renderiza piezas visuales reutilizables.
+- `services/` calcula, transforma y prepara datos.
+- `clients/` consume APIs externas.
+- `core/` centraliza configuración y constantes.
+- `utils/` contiene helpers genéricos.
+
+---
+
+## Flujo general del panel
+
+Streamlit `app.py`
+↓  
+Carga configuración desde `core/config.py`
+↓  
+Consulta datos de Binance mediante `services/market_data_service.py`
+↓  
+Prepara indicadores con `services/indicators_service.py`
+↓  
+Construye contexto con `services/context_service.py`
+↓  
+Construye liquidez con `services/liquidity_service.py`
+↓  
+Renderiza vistas desde `views/`
+↓  
+Consulta backend mediante `clients/backend_client.py`
+↓  
+Prepara datos visuales con `alert_view_service.py` y `validation_view_service.py`
+↓  
+Muestra dashboard operativo al usuario
+
+---
+
+## Capas del panel Streamlit
+
+---
+
+### 1. `app.py` — Orquestador principal
+
+Archivo principal del panel.
+
+Responsabilidades:
+
+- Configurar la página Streamlit.
+- Cargar configuración global.
+- Descargar datos de mercado.
+- Preparar dataframes.
+- Construir contexto operativo.
+- Construir mapa de liquidez.
+- Renderizar sidebar.
+- Renderizar métricas principales.
+- Renderizar señal actual.
+- Renderizar tabs principales.
+- Controlar auto-refresh.
+
+No debe contener:
+
+- lógica pesada de indicadores,
+- llamadas HTTP directas,
+- cálculos de liquidez,
+- cálculos de probabilidad,
+- backtest,
+- textos largos de explicación,
+- lógica completa de tabs.
+
+Ejemplo de responsabilidad de `app.py`:
+
+Inicializar → cargar datos → construir contexto → renderizar views
+
+---
+
+### 2. `core/` — Configuración y constantes
+
+Contiene configuración global del panel.
+
+Archivos principales:
+
+- `core/config.py`
+- `core/constants.py`
+
+#### `core/config.py`
+
+Responsabilidades:
+
+- Leer variables de entorno.
+- Definir URL base del backend.
+- Construir endpoints del backend.
+- Definir timeouts.
+- Definir configuración de página Streamlit.
+- Definir símbolo por defecto.
+- Definir endpoints Binance.
+- Definir configuración de cache y auto-refresh.
+
+Ejemplos:
+
+- `BACKEND_BASE_URL`
+- `BACKEND_LATEST_URL`
+- `BACKEND_ALERTS_URL`
+- `BACKEND_VALIDATION_URL`
+- `BACKEND_ALERTS_SUPABASE_URL`
+- `BACKEND_SETUPS_SUPABASE_URL`
+- `PAGE_TITLE`
+- `PAGE_ICON`
+- `PAGE_LAYOUT`
+- `DEFAULT_SYMBOL`
+- `CACHE_TTL_SECONDS`
+- `DEFAULT_REQUEST_TIMEOUT`
+
+#### `core/constants.py`
+
+Responsabilidades:
+
+- Centralizar constantes operativas del sistema de trading.
+- Evitar valores hardcodeados dispersos.
+
+Ejemplos:
+
+- `TP_BASE`
+- `SL_BASE`
+- `RISK_REWARD_WEIGHT`
+- `CAPITAL_EUR`
+- `RIESGO_POR_TRADE`
+- `APALANCAMIENTO`
+- `TP_REAL`
+- `SL_REAL`
+- `COMISION`
+
+---
+
+### 3. `utils/` — Helpers genéricos
+
+Contiene funciones auxiliares reutilizables que no pertenecen a una vista ni a un servicio específico.
+
+Archivo principal:
+
+- `utils/math_utils.py`
+
+Responsabilidades:
+
+- Conversión segura a float.
+- Clasificación de ratings.
+- Cálculo auxiliar de trailing.
+- Helpers matemáticos simples.
+
+Funciones principales:
+
+- `safe_float()`
+- `rating_score()`
+- `calcular_trailing()`
+
+Ejemplo de uso:
+
+- `trade_evaluator_view.py` usa `rating_score()`.
+- `context_service.py` usa `safe_float()`.
+- `trade_engine_service.py` usa `calcular_trailing()`.
+
+---
+
+### 4. `clients/` — Clientes externos
+
+Contiene conectores HTTP hacia APIs externas o servicios propios.
+
+Archivo principal:
+
+- `clients/backend_client.py`
+
+Responsabilidades:
+
+- Centralizar todas las llamadas HTTP al backend FastAPI.
+- Evitar `requests.get()` dispersos dentro de las vistas.
+- Manejar timeouts.
+- Manejar errores de conexión.
+- Devolver respuestas seguras.
+- Aplicar cache de Streamlit cuando corresponde.
+
+Funciones principales:
+
+- `fetch_backend_json()`
+- `get_latest_backend_data()`
+- `get_latest_validation_data()`
+- `get_alerts_history()`
+- `get_alerts_history_supabase()`
+- `get_setups_supabase()`
+- `health_backend()`
+- `health_binance()`
+- `health_supabase()`
+
+Endpoints consumidos:
+
+- `GET /api/latest`
+- `GET /api/validation/latest`
+- `GET /api/alerts`
+- `GET /api/alerts/supabase`
+- `GET /api/setups/supabase`
+- `GET /api/health/binance`
+- `GET /api/health/supabase`
+
+---
+
+### 5. `services/` — Lógica de negocio y preparación de datos
+
+La capa `services/` contiene cálculos, transformaciones y preparación de datos. No debe renderizar interfaz Streamlit directamente.
+
+#### `services/market_data_service.py`
+
+Responsabilidad:
+
+- Descargar datos OHLCV desde Binance.
+- Construir dataframes base por timeframe.
+
+Funciones:
+
+- `get_klines()`
+- `obtener_datos_binance()`
+
+Timeframes usados:
+
+- `1m`
+- `5m`
+- `15m`
+- `1h`
+
+---
+
+#### `services/indicators_service.py`
+
+Responsabilidad:
+
+- Calcular indicadores técnicos propios.
+- Preparar dataframes enriquecidos para cada timeframe.
+
+Indicadores incluidos:
+
+- EMA
+- RSI
+- ATR
+- ROC
+- Bollinger Bands
+- VWAP
+- ADX / DMI
+- Supertrend
+- Volumen relativo
+- Volatilidad
+- Swing high / swing low
+
+Funciones:
+
+- `ema()`
+- `rsi()`
+- `atr()`
+- `roc()`
+- `bbands()`
+- `vwap()`
+- `adx_dmi()`
+- `supertrend()`
+- `preparar_tf()`
+- `preparar_1m()`
+- `preparar_5m_contexto()`
+
+---
+
+#### `services/context_service.py`
+
+Responsabilidad:
+
+- Construir el contexto operativo general del mercado.
+- Clasificar régimen.
+- Clasificar fase.
+- Evaluar estructura LONG / SHORT.
+- Evaluar agotamiento.
+- Calcular probabilidad base.
+- Calcular EV base.
+
+Función principal:
+
+- `construir_contexto()`
+
+Salida principal:
+
+- `price_1m`
+- `price_5m`
+- `fase`
+- `market_regime`
+- `adx_5m`
+- `rsi_1m`
+- `roc`
+- `atr`
+- `bb_width`
+- `above_vwap`
+- `above_ema200`
+- `ema_bullish_stack`
+- `ema_bearish_stack`
+- `long_valido`
+- `short_valido`
+- `probabilidad`
+- `EV`
+
+---
+
+#### `services/liquidity_service.py`
+
+Responsabilidad:
+
+- Construir el motor de liquidez local.
+- Detectar pivots.
+- Identificar liquidez por encima y por debajo del precio.
+- Agrupar zonas.
+- Calcular riesgo de liquidez.
+- Explicar riesgo de liquidez para LONG o SHORT.
+
+Funciones:
+
+- `detectar_pivots()`
+- `contar_toques()`
+- `agrupar_zonas()`
+- `market_liquidity_risk()`
+- `liquidity_risk_explained()`
+- `construir_liquidity_engine()`
+
+Salida principal:
+
+- `nearest_resistance`
+- `nearest_support`
+- `dist_up`
+- `dist_down`
+- `dist_up_pct`
+- `dist_down_pct`
+- `strong_resistances`
+- `strong_supports`
+- `liquidity_attraction`
+- `market_clean`
+- `market_lrs`
+- `resistance_zones`
+- `support_zones`
+
+---
+
+#### `services/mtf_service.py`
+
+Responsabilidad:
+
+- Validar condiciones multi-timeframe.
+- Evaluar LONG y SHORT en 1H, 15M y 5M.
+- Medir apertura de EMAs en 5M.
+
+Funciones:
+
+- `emas_abiertas_5m()`
+- `evaluar_mtf()`
+
+Validaciones principales:
+
+1H:
+
+- EMA50 vs EMA200
+- DI+ / DI-
+- ADX
+- RSI
+- ATR no decreciente
+
+15M:
+
+- Precio vs EMA20
+- ADX subiendo
+- RSI
+- DI+ / DI-
+
+5M:
+
+- Abanico EMA9 / EMA20 / EMA50
+- ADX
+- DI+ / DI-
+
+---
+
+#### `services/trade_engine_service.py`
+
+Responsabilidad:
+
+- Calcular niveles de trade.
+- Calcular TP, SL, break even y trailing.
+- Calcular riesgo, beneficio y R:R.
+- Calcular tamaño de posición real.
+
+Funciones:
+
+- `compute_trade_levels()`
+- `calcular_posicion_real()`
+
+Salida principal:
+
+- `tp`
+- `sl`
+- `be`
+- `trailing`
+- `risk_pct`
+- `reward_pct`
+- `rr`
+- `risk_label`
+- `reward_label`
+- `rr_label`
+- `posicion`
+- `margen`
+- `riesgo`
+- `beneficio`
+- `comisiones`
+
+---
+
+#### `services/probability_service.py`
+
+Responsabilidad:
+
+- Calcular probabilidad real de alcanzar TP.
+- Calcular probabilidad de rentabilidad.
+- Generar debug de factores ponderados.
+
+Funciones:
+
+- `probabilidad_tp_real()`
+- `probabilidad_rentable()`
+
+Factores considerados:
+
+- `prob_mercado`
+- `prob_entry`
+- R:R
+- ATR ratio
+- ADX
+- RSI
+- Liquidity Risk Score
+- Atracción de liquidez
+- EMA stack
+- VWAP
+- `market_regime`
+
+---
+
+#### `services/backtest_service.py`
+
+Responsabilidad:
+
+- Registrar señales locales.
+- Buscar condiciones históricas similares.
+- Calcular probabilidad histórica.
+- Ejecutar backtest rápido 1M.
+
+Funciones:
+
+- `log_signal()`
+- `condiciones_similares()`
+- `probabilidad_historica()`
+- `backtest()`
+
+Salidas:
+
+- wins
+- losses
+- winrate
+- capital final simulado
+- probabilidad histórica LONG
+- probabilidad histórica SHORT
+
+---
+
+#### `services/explanation_service.py`
+
+Responsabilidad:
+
+- Centralizar textos explicativos largos.
+- Evitar que `app.py` o las views contengan bloques extensos de documentación textual.
+
+Funciones:
+
+- `explicacion_prob_mercado()`
+- `explicacion_mercado_fuerza()`
+- `explicacion_fase()`
+- `explicacion_climax()`
+- `explicacion_adx_cayendo()`
+- `explicacion_prob_entry()`
+- `explicacion_momentum_bajista()`
+- `explicacion_momentum_alcista()`
+- `explicacion_rsi_saludable()`
+- `explicacion_microtendencia_contraria()`
+- `explicacion_vwap()`
+- `explicacion_sin_energia()`
+- `explicacion_compresion_extrema()`
+- `explicacion_prob_tp_real()`
+- `explicacion_prob_rentable()`
+- `explicacion_calidad_setup()`
+
+---
+
+#### `services/alert_view_service.py`
+
+Responsabilidad:
+
+- Preparar datos de alertas para visualización.
+- Extraer resumen de última alerta.
+- Preparar histórico de alertas en formato tabular.
+- Extraer detalle de cada alerta para expanders.
+
+Funciones:
+
+- `unwrap_latest_response()`
+- `extract_latest_alert_summary()`
+- `build_latest_alert_metrics()`
+- `build_alert_history_rows()`
+- `build_alert_history_dataframe()`
+- `build_alert_expander_title()`
+- `extract_alert_detail()`
+
+---
+
+#### `services/validation_view_service.py`
+
+Responsabilidad:
+
+- Preparar datos de validación para visualización.
+- Extraer métricas globales.
+- Extraer pasos de validación.
+- Extraer razones, penalizaciones y snapshots.
+- Separar bloques Pine / Backend / Probabilidad.
+
+Funciones:
+
+- `extract_validation_container()`
+- `extract_validation_block()`
+- `format_probability_value()`
+- `build_validation_metrics()`
+- `extract_validation_sections()`
+- `get_step()`
+- `build_step_title()`
+- `get_pine_step_names()`
+- `get_backend_step_names()`
+- `extract_probability_model_summary()`
+- `get_approve_status_message()`
+
+---
+
+### 6. `components/` — Componentes visuales reutilizables
+
+La capa `components/` contiene piezas visuales pequeñas y reutilizables. No contiene lógica de negocio.
+
+Archivos:
+
+- `components/ui_helpers.py`
+- `components/cards.py`
+- `components/badges.py`
+- `components/tables.py`
+
+#### `components/ui_helpers.py`
+
+Responsabilidad:
+
+- Renderizar helpers visuales comunes.
+- Mostrar bloques de explicación.
+- Mostrar JSON en expanders.
+- Mostrar listas de textos.
+- Renderizar divisores visuales.
+
+Funciones:
+
+- `render_info_item()`
+- `render_json_expander()`
+- `render_text_list()`
+- `render_section_divider()`
+
+#### `components/cards.py`
+
+Responsabilidad:
+
+- Renderizar cards y métricas reutilizables.
+
+Funciones:
+
+- `render_metric_card()`
+- `render_four_metrics()`
+- `render_status_message()`
+
+#### `components/badges.py`
+
+Responsabilidad:
+
+- Renderizar badges visuales de estado.
+
+Funciones:
+
+- `render_approve_badge()`
+- `render_boolean_badge()`
+- `render_direction_badge()`
+
+#### `components/tables.py`
+
+Responsabilidad:
+
+- Renderizar dataframes y diccionarios como tablas.
+
+Funciones:
+
+- `render_dataframe()`
+- `render_dict_as_dataframe()`
+
+---
+
+### 7. `views/` — Vistas completas del dashboard
+
+La capa `views/` contiene pantallas o secciones completas. Las views renderizan UI consumiendo datos ya preparados por `services/`.
+
+Archivos:
+
+- `views/sidebar.py`
+- `views/current_signal_view.py`
+- `views/backend_monitor_view.py`
+- `views/context_view.py`
+- `views/liquidity_view.py`
+- `views/mtf_view.py`
+- `views/trade_evaluator_view.py`
+- `views/backtest_view.py`
+
+#### `views/sidebar.py`
+
+Responsabilidad:
+
+- Renderizar sidebar de auto-refresh.
+- Renderizar configuración del símbolo.
+- Mostrar endpoints Binance.
+
+Funciones:
+
+- `render_initial_backend_sidebar()`
+- `render_market_sidebar()`
+
+#### `views/current_signal_view.py`
+
+Responsabilidad:
+
+- Mostrar la señal actual del entorno.
+- Mostrar LONG válido, SHORT válido, esperar o contexto ambiguo.
+- Calcular niveles de trade del entorno actual.
+- Registrar señal local si corresponde.
+
+Función:
+
+- `render_current_signal_view()`
+
+#### `views/backend_monitor_view.py`
+
+Responsabilidad:
+
+- Mostrar monitor del backend.
+- Mostrar última alerta recibida.
+- Mostrar última validación.
+- Mostrar razones y penalizaciones.
+- Mostrar snapshot de mercado backend.
+- Mostrar histórico Supabase.
+- Mostrar payloads completos.
+
+Función:
+
+- `render_backend_monitor_tab()`
+
+#### `views/context_view.py`
+
+Responsabilidad:
+
+- Mostrar régimen de mercado.
+- Mostrar RSI, ROC y ATR.
+- Mostrar contexto VWAP / EMA200 / EMAs.
+- Mostrar compresión de volatilidad.
+- Mostrar EV base.
+
+Función:
+
+- `render_context_tab()`
+
+#### `views/liquidity_view.py`
+
+Responsabilidad:
+
+- Mostrar liquidez cercana.
+- Mostrar distancia hacia soporte y resistencia.
+- Mostrar intención probable del mercado.
+- Mostrar zonas institucionales.
+- Mostrar riesgo de liquidez.
+- Mostrar estado operativo del mercado.
+
+Función:
+
+- `render_liquidity_tab()`
+
+#### `views/mtf_view.py`
+
+Responsabilidad:
+
+- Mostrar validación MTF.
+- Evaluar LONG y SHORT.
+- Mostrar apertura de EMAs 5M.
+- Mostrar checks por timeframe.
+
+Función:
+
+- `render_mtf_tab()`
+
+#### `views/trade_evaluator_view.py`
+
+Responsabilidad:
+
+- Mostrar evaluador manual de entrada.
+- Calcular condición de mercado.
+- Calcular calidad de entrada.
+- Mostrar gestión del trade.
+- Mostrar probabilidad de TP.
+- Mostrar probabilidad de rentabilidad.
+- Mostrar calidad técnica.
+- Mostrar decisión final.
+- Mostrar gestión de posición.
+
+Función:
+
+- `render_trade_evaluator_tab()`
+
+#### `views/backtest_view.py`
+
+Responsabilidad:
+
+- Mostrar backtest rápido 1M.
+- Mostrar wins, losses, winrate y capital final.
+- Mostrar probabilidad histórica por condiciones similares.
+
+Función:
+
+- `render_backtest_tab()`
+
+---
+
+## Estructura final del panel
+
+streamlit_app/
+├── app.py
+├── .env
+├── requirements.txt
+│
+├── core/
+│   ├── __init__.py
+│   ├── config.py
+│   └── constants.py
+│
+├── utils/
+│   ├── __init__.py
+│   └── math_utils.py
+│
+├── clients/
+│   ├── __init__.py
+│   └── backend_client.py
+│
+├── services/
+│   ├── __init__.py
+│   ├── market_data_service.py
+│   ├── indicators_service.py
+│   ├── context_service.py
+│   ├── liquidity_service.py
+│   ├── mtf_service.py
+│   ├── trade_engine_service.py
+│   ├── probability_service.py
+│   ├── backtest_service.py
+│   ├── explanation_service.py
+│   ├── alert_view_service.py
+│   └── validation_view_service.py
+│
+├── components/
+│   ├── __init__.py
+│   ├── ui_helpers.py
+│   ├── cards.py
+│   ├── badges.py
+│   └── tables.py
+│
+└── views/
+    ├── __init__.py
+    ├── sidebar.py
+    ├── current_signal_view.py
+    ├── backend_monitor_view.py
+    ├── context_view.py
+    ├── liquidity_view.py
+    ├── mtf_view.py
+    ├── trade_evaluator_view.py
+    └── backtest_view.py
+
+---
+
+## Workflow interno de ejecución
+
+1. `app.py` inicia Streamlit.
+2. `core/config.py` carga variables de entorno.
+3. `app.py` carga datos de Binance.
+4. `indicators_service.py` prepara indicadores.
+5. `context_service.py` construye contexto.
+6. `liquidity_service.py` construye liquidez.
+7. `sidebar.py` renderiza controles laterales.
+8. `current_signal_view.py` muestra señal actual.
+9. `backend_monitor_view.py` consulta backend/Supabase.
+10. `context_view.py` muestra contexto.
+11. `liquidity_view.py` muestra liquidez.
+12. `mtf_view.py` muestra validación MTF.
+13. `trade_evaluator_view.py` permite evaluación manual.
+14. `backtest_view.py` muestra backtest rápido.
+15. `app.py` ejecuta auto-refresh si está activo.
+
+---
+
+## Responsabilidades por fuente de datos
+
+### TradingView
+
+Responsable de:
+
+- Generar señales.
+- Enviar contexto técnico.
+- Enviar trigger.
+- Enviar quality score.
+- Enviar estructura.
+- Enviar liquidez detectada en Pine.
+- Enviar HTF context.
+
+### Backend FastAPI
+
+Responsable de:
+
+- Recibir alertas.
+- Normalizar payloads.
+- Ensamblar core + extra.
+- Validar entradas.
+- Consultar Binance.
+- Calcular microestructura.
+- Calcular score externo.
+- Estimar probabilidad TP antes SL.
+- Persistir en Supabase.
+- Exponer endpoints al panel.
+
+### Supabase
+
+Responsable de:
+
+- Guardar `alert_events`.
+- Guardar `trade_setups`.
+- Guardar `validation_results`.
+- Servir histórico al dashboard.
+
+### Binance
+
+Responsable de:
+
+- Proveer OHLCV.
+- Proveer datos de mercado para indicadores locales.
+- Alimentar contexto, liquidez y backtest local.
+
+### Streamlit
+
+Responsable de:
+
+- Visualizar alertas.
+- Visualizar validaciones.
+- Visualizar histórico.
+- Mostrar análisis local.
+- Evaluar manualmente trades.
+- Mostrar backtest y contexto operativo.
+
+---
+
+## Variables de entorno del panel
+
+Archivo recomendado:
+
+`streamlit_app/.env`
+
+Ejemplo:
+
+BACKEND_BASE_URL=http://localhost:8000
+# BACKEND_BASE_URL=https://alertas-tdv-67cu-two.vercel.app
+
+STREAMLIT_REQUEST_TIMEOUT=25
+STREAMLIT_SHORT_REQUEST_TIMEOUT=10
+STREAMLIT_CACHE_TTL_SECONDS=5
+
+STREAMLIT_PAGE_TITLE=Panel Operativo BTC
+STREAMLIT_PAGE_ICON=📊
+STREAMLIT_PAGE_LAYOUT=wide
+
+TRADING_SYMBOL=BTCUSDC
+
+STREAMLIT_SIGNAL_LOG_FILE=signals_log.csv
+
+STREAMLIT_DEFAULT_AUTO_REFRESH=true
+STREAMLIT_DEFAULT_REFRESH_SECONDS=10
+STREAMLIT_MIN_REFRESH_SECONDS=5
+STREAMLIT_MAX_REFRESH_SECONDS=60
+
+STREAMLIT_DEFAULT_HISTORY_LIMIT=50
+STREAMLIT_DEBUG=false
+
+---
+
+## Ejecución local
+
+Desde la carpeta del panel:
+
+cd streamlit_app
+
+Instalar dependencias:
+
+pip install -r requirements.txt
+
+Ejecutar:
+
+streamlit run app.py
+
+---
+
+## Beneficios de esta arquitectura
+
+La nueva arquitectura permite:
+
+1. Mantener `app.py` limpio y fácil de leer.
+2. Modificar una tab sin afectar el resto del panel.
+3. Reutilizar cálculos en futuras vistas.
+4. Reutilizar componentes visuales.
+5. Cambiar endpoints desde `.env`.
+6. Separar datos, lógica y presentación.
+7. Reducir riesgo de errores al agregar funcionalidades.
+8. Preparar el panel para tests unitarios.
+9. Preparar el panel para despliegue en Streamlit Cloud u otra plataforma.
+10. Facilitar mantenimiento futuro del sistema de trading.
+
+Esta estructura permite continuar el desarrollo agregando dashboard avanzado, ML, LLM explanation, métricas de performance, automatización y análisis histórico sin seguir creciendo sobre archivos monolíticos.
