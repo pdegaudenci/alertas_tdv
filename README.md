@@ -27,7 +27,7 @@ Dashboard / Streamlit / Análisis histórico / ML futuro
 Esta API no reemplaza la lógica de Pine Script. La API actúa como una capa posterior de validación, persistencia y enriquecimiento.
 
 ---
-
+![Workflow de ejecución del backend al recibir alerta](https://raw.githubusercontent.com/pdegaudenci/alertas_tdv/master/backend/docs/image.png)
 ## 2. Responsabilidades del sistema
 
 El sistema está dividido en dos grandes responsabilidades:
