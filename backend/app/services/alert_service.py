@@ -37,6 +37,17 @@ def parse_payload(raw_body: bytes) -> dict:
         return {"raw_message": text_body}
 
 
+def first_non_empty(*values: Any) -> Any:
+    """
+    Devuelve el primer valor que no sea None ni string vacío.
+    Importante: conserva 0 y False como valores válidos.
+    """
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return None
+
+
 def ensure_canonical_schema(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
@@ -47,21 +58,47 @@ def ensure_canonical_schema(payload: Dict[str, Any]) -> Dict[str, Any]:
     execution = out.get("execution", {}) if isinstance(out.get("execution"), dict) else {}
     context = out.get("context", {}) if isinstance(out.get("context"), dict) else {}
 
+    canonical_price = first_non_empty(
+        signal.get("market_price"),
+        signal.get("entry_price"),
+        signal.get("price"),
+        signal.get("close"),
+        execution.get("entry_price"),
+        execution.get("market_price"),
+        out.get("price"),
+        out.get("close"),
+        out.get("entry_price"),
+        out.get("market_price"),
+    )
+
+    canonical_entry_price = first_non_empty(
+        signal.get("entry_price"),
+        signal.get("market_price"),
+        signal.get("price"),
+        signal.get("close"),
+        execution.get("entry_price"),
+        execution.get("market_price"),
+        out.get("entry_price"),
+        out.get("market_price"),
+        out.get("price"),
+        out.get("close"),
+    )
+
     out["signal"] = {
         **signal,
-        "symbol": signal.get("symbol") or out.get("symbol") or out.get("ticker") or "BTCUSDC",
-        "tf": signal.get("tf") or out.get("tf") or out.get("timeframe") or "1m",
-        "event": signal.get("event") or out.get("event"),
-        "side": signal.get("side") or out.get("side"),
-        "price": signal.get("market_price") or signal.get("entry_price") or out.get("price"),
-        "entry_price": signal.get("entry_price") or signal.get("market_price") or out.get("price"),
-        "setup": signal.get("setup") or signal.get("setup_state") or out.get("setup"),
+        "symbol": first_non_empty(signal.get("symbol"), out.get("symbol"), out.get("ticker"), "BTCUSDC"),
+        "tf": first_non_empty(signal.get("tf"), out.get("tf"), out.get("timeframe"), "1m"),
+        "event": first_non_empty(signal.get("event"), out.get("event")),
+        "side": first_non_empty(signal.get("side"), out.get("side")),
+        "price": canonical_price,
+        "entry_price": canonical_entry_price,
+        "setup": first_non_empty(signal.get("setup"), signal.get("setup_state"), out.get("setup")),
     }
 
     out["context"] = {
         **context,
-        "regime": context.get("regime") or out.get("regime"),
-        "phase": context.get("phase") or out.get("phase"),
+        "regime": first_non_empty(context.get("regime"), out.get("regime")),
+        "phase": first_non_empty(context.get("phase"), out.get("phase")),
         "dir_state": context.get("dir_state"),
         "mov_state": context.get("mov_state"),
         "liq_state": context.get("liq_state"),
@@ -71,15 +108,20 @@ def ensure_canonical_schema(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     out["trade_plan"] = {
         **existing_trade_plan,
-        "tp_price": existing_trade_plan.get("tp_price") or execution.get("tp_price"),
-        "sl_price": existing_trade_plan.get("sl_price") or execution.get("sl_price"),
-        "rr_ratio": existing_trade_plan.get("rr_ratio") or execution.get("rr_ratio"),
-        "distance_to_tp_pct": existing_trade_plan.get("distance_to_tp_pct") or execution.get("distance_to_tp_pct"),
-        "distance_to_sl_pct": existing_trade_plan.get("distance_to_sl_pct") or execution.get("distance_to_sl_pct"),
+        "tp_price": first_non_empty(existing_trade_plan.get("tp_price"), execution.get("tp_price")),
+        "sl_price": first_non_empty(existing_trade_plan.get("sl_price"), execution.get("sl_price")),
+        "rr_ratio": first_non_empty(existing_trade_plan.get("rr_ratio"), execution.get("rr_ratio")),
+        "distance_to_tp_pct": first_non_empty(
+            existing_trade_plan.get("distance_to_tp_pct"),
+            execution.get("distance_to_tp_pct"),
+        ),
+        "distance_to_sl_pct": first_non_empty(
+            existing_trade_plan.get("distance_to_sl_pct"),
+            execution.get("distance_to_sl_pct"),
+        ),
     }
 
     return out
-
 
 def assemble_event_payload(payload_raw: Dict[str, Any]) -> Dict[str, Any]:
     return ensure_canonical_schema(payload_raw)

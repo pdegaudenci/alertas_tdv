@@ -620,7 +620,6 @@ async def get_alerts_supabase_service(limit: int = 50):
 
         for row in rows:
             normalized = row.get("normalized_payload") or {}
-            normalized = row.get("normalized_payload") or {}
             technical = row.get("technical_state") or {}
             micro = row.get("microstructure_state") or {}
             raw = row.get("raw_payload") or {}
