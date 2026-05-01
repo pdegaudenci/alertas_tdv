@@ -4,6 +4,12 @@ Rutas webhook TradingView.
 Endpoints:
 - /api/webhook
 - /
+
+Modo correcto anti-timeout:
+- Recibe alerta.
+- Guarda payload en cola Supabase backend_alert_queue.
+- Responde rápido.
+- NO ejecuta validación/Supabase operativo/S3/Telegram en el request.
 """
 
 from typing import Optional
@@ -29,11 +35,11 @@ from app.services.webhook_state_service import (
 from app.services.alert_service import (
     parse_payload,
     assemble_event_payload,
-    assemble_core_extra_by_event_uid,
     build_history_item,
 )
-from app.services.webhook_background_service import process_alert_background
+from app.services.alert_queue_service import enqueue_alert_payload
 from app.services.error_log_service import persist_backend_error_log
+
 
 router = APIRouter()
 
@@ -53,6 +59,7 @@ async def tradingview_webhook(
             "method": request.method,
             "query_params": dict(request.query_params),
             "client": request.client.host if request.client else None,
+            "mode": "queue_only_fast_ack",
         })
 
         validate_secret(x_webhook_secret)
@@ -60,7 +67,11 @@ async def tradingview_webhook(
         raw_body = await request.body()
         raw_text = raw_body.decode("utf-8", errors="replace")
 
-        debug_mode = str(request.query_params.get("debug", "0")).lower() in {"1", "true", "yes"}
+        debug_mode = str(request.query_params.get("debug", "0")).lower() in {
+            "1",
+            "true",
+            "yes",
+        }
 
         if debug_mode:
             return JSONResponse(
@@ -76,9 +87,7 @@ async def tradingview_webhook(
         t0_parse = time.perf_counter()
 
         payload_raw = parse_payload(raw_body)
-        payload_raw = assemble_event_payload(payload_raw)
-
-        payload, payload_complete = assemble_core_extra_by_event_uid(payload_raw)
+        payload = assemble_event_payload(payload_raw)
 
         parse_ms = round((time.perf_counter() - t0_parse) * 1000, 2)
 
@@ -95,29 +104,30 @@ async def tradingview_webhook(
 
         set_validation_queued(payload)
         set_last_alert_fast_ack(payload, trace_id)
-        if not payload_complete:
-            set_last_alert_partial(payload)
 
-            return JSONResponse(
-                status_code=200,
-                content=sanitize_for_json({
-                    "ok": True,
-                    "message": "Partial payload received. Waiting for matching CORE/EXTRA.",
-                    "event_uid": payload.get("event_uid"),
-                    "message_type": payload.get("message_type"),
-                }),
-            )
+        queue_result = await enqueue_alert_payload(
+            payload=payload,
+            trace_id=trace_id,
+            source="tradingview_webhook",
+        )
+
+        message_type = str(payload.get("message_type") or "").lower()
+
+        if message_type in {"logical_event_core", "logical_event_extra"}:
+            set_last_alert_partial(payload)
 
         history_item = sanitize_for_json(build_history_item(payload, LAST_VALIDATION))
         ALERT_HISTORY.append(history_item)
 
-        background_tasks.add_task(process_alert_background, payload, trace_id)
-
         total_ms = round((time.perf_counter() - t0_total) * 1000, 2)
 
         response_content = sanitize_for_json({
-            "ok": True,
-            "message": "Alert received quickly. Validation, Supabase and Telegram queued in background.",
+            "ok": bool(queue_result.get("ok")),
+            "message": (
+                "Alert queued quickly. Processing deferred."
+                if queue_result.get("ok")
+                else "Alert received but queue insert failed."
+            ),
             "trace_id": trace_id,
             "processing_ms": total_ms,
             "event_uid": payload.get("event_uid"),
@@ -125,11 +135,17 @@ async def tradingview_webhook(
             "event": signal.get("event") or payload.get("event"),
             "side": signal.get("side") or payload.get("side"),
             "symbol": signal.get("symbol") or payload.get("symbol") or payload.get("ticker"),
+            "queue": queue_result,
+            "background_processing": False,
+            "processing_mode": "queued_deferred",
         })
 
         log_trace(trace_id, "webhook_fast_response_sent", response_content)
 
-        return JSONResponse(status_code=200, content=response_content)
+        return JSONResponse(
+            status_code=200 if queue_result.get("ok") else 500,
+            content=response_content,
+        )
 
     except HTTPException as e:
         log_event("webhook_http_exception", {
@@ -152,18 +168,20 @@ async def tradingview_webhook(
             "traceback": traceback.format_exc(),
             "response": error_response,
         })
+
         await persist_backend_error_log(
-                stage="webhook_unhandled_exception",
-                error=e,
-                trace_id=trace_id if "trace_id" in locals() else "-",
-                payload=payload if "payload" in locals() and isinstance(payload, dict) else {},
-                route="/api/webhook",
-                context={
-                    "component": "webhook_routes",
-                    "operation": "tradingview_webhook",
-                    "response": error_response,
-                },
-            )
+            stage="webhook_unhandled_exception",
+            error=e,
+            trace_id=trace_id if "trace_id" in locals() else "-",
+            payload=payload if "payload" in locals() and isinstance(payload, dict) else {},
+            route="/api/webhook",
+            context={
+                "component": "webhook_routes",
+                "operation": "tradingview_webhook",
+                "response": error_response,
+            },
+        )
+
         return JSONResponse(status_code=500, content=error_response)
 
 

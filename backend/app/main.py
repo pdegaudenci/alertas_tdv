@@ -13,6 +13,7 @@ from app.api.health_routes import router as health_router
 from app.api.dashboard_routes import router as dashboard_router
 from app.api.validation_routes import router as validation_router
 from app.api.webhook_routes import router as webhook_router
+from app.api.processing_routes import router as processing_router
 
 
 app = FastAPI(
@@ -32,3 +33,4 @@ app.include_router(health_router)
 app.include_router(dashboard_router)
 app.include_router(validation_router)
 app.include_router(webhook_router)
+app.include_router(processing_router)
