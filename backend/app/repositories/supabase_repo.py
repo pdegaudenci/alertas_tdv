@@ -58,52 +58,116 @@ else:
         "reason": "missing_env_vars",
     })
 
-
 def should_persist_payload(payload: Dict[str, Any]) -> bool:
+    """
+    Decide si un payload debe persistirse en Supabase.
+
+    Regla del proyecto:
+    - Supabase = capa operativa / dashboard / estado reciente.
+    - Databricks = histórico completo / analítica / ML / backtesting.
+
+    Por tanto:
+    - Supabase guarda eventos relevantes para operar.
+    - Databricks guarda todos los payloads completos por separado.
+    """
+
     source = payload.get("source", {}) if isinstance(payload.get("source"), dict) else {}
     script = str(source.get("script") or payload.get("strategy_name") or "").strip()
-    message_type = str(payload.get("message_type") or "").strip()
+
+    message_type = str(payload.get("message_type") or "").strip().lower()
 
     signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
     event = str(signal.get("event") or payload.get("event") or "").upper().strip()
 
-    if script == "PHASE_INDICATOR_V8_FULL_ALERTS":
-        return True
-
-    if script == "SETUP_CLASSIFIER_MASTER_v7_3_FULL_API_ALERTS":
-        if message_type == "logical_event_full":
-            return event in {
-                "LONG_INIT",
-                "SHORT_INIT",
-                "LONG_INIT_AFTER_ADAPTIVE",
-                "SHORT_INIT_AFTER_ADAPTIVE",
-                "IMP_UP_AFTER_ADAPTIVE",
-                "IMP_DN_AFTER_ADAPTIVE",
-                "LONG_ENTRY",
-                "SHORT_ENTRY",
-                "REAL_LONG_ENTRY",
-                "REAL_SHORT_ENTRY",
-                "REAL_LONG_EXIT",
-                "REAL_SHORT_EXIT",
-                "EXECUTED_EXIT",
-                "LONG_CANCEL",
-                "SHORT_CANCEL",
-                "CANCEL",
-            }
-
-        if message_type == "executed_event":
-            return event in {
-                "REAL_LONG_ENTRY",
-                "REAL_SHORT_ENTRY",
-                "REAL_LONG_EXIT",
-                "REAL_SHORT_EXIT",
-                "EXECUTED_EXIT",
-            }
-
+    if not event:
         return False
 
-    return False
+    # ========================================================
+    # 1. Siempre guardar eventos reales de ejecución
+    # ========================================================
 
+    if message_type == "executed_event":
+        return event in {
+            "REAL_LONG_ENTRY",
+            "REAL_SHORT_ENTRY",
+            "REAL_LONG_EXIT",
+            "REAL_SHORT_EXIT",
+            "EXECUTED_EXIT",
+        }
+
+    # ========================================================
+    # 2. Guardar solo eventos lógicos completos
+    #    No guardar core/extra sueltos en Supabase.
+    #    El merge core+extra ya ocurre antes.
+    # ========================================================
+
+    if message_type not in {
+        "logical_event_full",
+        "logical_event",
+    }:
+        return False
+
+    # ========================================================
+    # 3. Eventos operativos relevantes para dashboard/app
+    # ========================================================
+
+    operational_events = {
+        # INIT / señales tempranas
+        "LONG_INIT",
+        "SHORT_INIT",
+        "LONG_INIT_AFTER_ADAPTIVE",
+        "SHORT_INIT_AFTER_ADAPTIVE",
+
+        # Impulsos relevantes
+        "IMP_UP_AFTER_ADAPTIVE",
+        "IMP_DN_AFTER_ADAPTIVE",
+
+        # Entradas lógicas validadas por backend
+        "LONG_ENTRY",
+        "SHORT_ENTRY",
+
+        # Entradas/salidas reales si llegasen como logical_event_full
+        "REAL_LONG_ENTRY",
+        "REAL_SHORT_ENTRY",
+        "REAL_LONG_EXIT",
+        "REAL_SHORT_EXIT",
+        "EXECUTED_EXIT",
+
+        # Cancelaciones
+        "LONG_CANCEL",
+        "SHORT_CANCEL",
+        "CANCEL",
+    }
+
+    if event not in operational_events:
+        return False
+
+    # ========================================================
+    # 4. Scripts conocidos del sistema
+    # ========================================================
+
+    known_scripts = {
+        "PHASE_INDICATOR_V8_FULL_ALERTS",
+        "SETUP_CLASSIFIER_MASTER_v7_3_FULL_API_ALERTS",
+        "REGIME_PHASE_SETUP_QUALITY_MASTER_v1",
+        "POSTMAN_TEST",
+    }
+
+    if script in known_scripts:
+        return True
+
+    # ========================================================
+    # 5. Fallback controlado:
+    #    Si el script viene vacío pero el payload tiene schema v2.0
+    #    y es un evento operativo, lo dejamos persistir.
+    # ========================================================
+
+    schema_version = str(payload.get("schema_version") or "").strip()
+
+    if schema_version == "2.0":
+        return True
+
+    return False
 
 def extract_setup_id(payload: Dict[str, Any]) -> str:
     signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
