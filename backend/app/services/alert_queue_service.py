@@ -12,7 +12,6 @@ Responsabilidad:
 from typing import Any, Dict, List, Optional
 import time
 import traceback
-
 from app.core.logging import log_event, log_trace
 from app.utils.json_utils import sanitize_for_json
 from app.utils.math_utils import nested_get

@@ -15,7 +15,7 @@ import os
 import traceback
 
 import boto3
-
+from botocore.config import Config
 from app.core.logging import log_trace, log_event
 from app.utils.time_utils import utc_now_iso
 from app.utils.json_utils import sanitize_for_json
@@ -38,18 +38,30 @@ def get_sqs_client():
     if _sqs_client is not None:
         return _sqs_client
 
+    sqs_config = Config(
+        connect_timeout=2,
+        read_timeout=3,
+        retries={
+            "max_attempts": 1,
+            "mode": "standard",
+        },
+    )
+
     _sqs_client = boto3.client(
         "sqs",
         region_name=AWS_REGION or None,
+        config=sqs_config,
     )
 
     log_event("sqs_client_init_ok", {
         "region": AWS_REGION,
         "queue_url_configured": bool(SQS_QUEUE_URL),
+        "connect_timeout": 2,
+        "read_timeout": 3,
+        "max_attempts": 1,
     })
 
     return _sqs_client
-
 
 def is_sqs_configured() -> bool:
     return bool(SQS_QUEUE_URL)

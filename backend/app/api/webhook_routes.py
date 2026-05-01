@@ -5,12 +5,12 @@ Endpoints:
 - /api/webhook
 - /
 
-Modo correcto anti-timeout:
+Modo anti-timeout:
 - Recibe alerta.
 - Valida secret desde header o payload.secret.
-- Envía payload a AWS SQS.
-- Responde rápido.
-- NO ejecuta validación/Supabase operativo/S3/Telegram en el request.
+- Responde rápido a TradingView.
+- Envía payload a AWS SQS en background.
+- NO ejecuta validación/Supabase/S3/Telegram en el request.
 """
 
 from typing import Optional
@@ -45,6 +45,58 @@ from app.services.error_log_service import persist_backend_error_log
 router = APIRouter()
 
 
+async def enqueue_sqs_background(payload: dict, trace_id: str) -> None:
+    """
+    Envía a SQS fuera del camino crítico del webhook.
+
+    Importante:
+    - TradingView ya recibió 200 antes de que esto termine.
+    - Si falla, se registra en backend_error_logs.
+    """
+
+    try:
+        result = await send_alert_to_sqs(
+            payload=payload,
+            trace_id=trace_id,
+            source="tradingview_webhook_background",
+        )
+
+        if not result.get("ok"):
+            await persist_backend_error_log(
+                stage="sqs_enqueue_background_failed",
+                error=result.get("error") or result.get("reason") or "SQS enqueue failed",
+                trace_id=trace_id,
+                payload=payload,
+                route="/api/webhook",
+                context={
+                    "component": "webhook_routes",
+                    "operation": "enqueue_sqs_background",
+                    "sqs_result": result,
+                },
+            )
+
+    except Exception as e:
+        log_trace(trace_id, "sqs_enqueue_background_exception", {
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+            "event_uid": payload.get("event_uid"),
+            "message_type": payload.get("message_type"),
+        }, level="ERROR")
+
+        await persist_backend_error_log(
+            stage="sqs_enqueue_background_exception",
+            error=e,
+            trace_id=trace_id,
+            payload=payload,
+            route="/api/webhook",
+            context={
+                "component": "webhook_routes",
+                "operation": "enqueue_sqs_background",
+                "traceback": traceback.format_exc(),
+            },
+        )
+
+
 @router.post("/api/webhook")
 async def tradingview_webhook(
     request: Request,
@@ -60,7 +112,7 @@ async def tradingview_webhook(
             "method": request.method,
             "query_params": dict(request.query_params),
             "client": request.client.host if request.client else None,
-            "mode": "sqs_fast_ack",
+            "mode": "fast_ack_sqs_background",
         })
 
         raw_body = await request.body()
@@ -73,8 +125,6 @@ async def tradingview_webhook(
 
         parse_ms = round((time.perf_counter() - t0_parse) * 1000, 2)
 
-        # TradingView no envía headers personalizados.
-        # Por eso aceptamos también payload.secret.
         validate_secret(
             x_webhook_secret=x_webhook_secret,
             payload_secret=payload.get("secret"),
@@ -111,33 +161,28 @@ async def tradingview_webhook(
         })
 
         signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
+        message_type = str(payload.get("message_type") or "").lower()
 
         set_validation_queued(payload)
         set_last_alert_fast_ack(payload, trace_id)
 
-        message_type = str(payload.get("message_type") or "").lower()
-
         if message_type in {"logical_event_core", "logical_event_extra"}:
             set_last_alert_partial(payload)
-
-        queue_result = await send_alert_to_sqs(
-            payload=payload,
-            trace_id=trace_id,
-            source="tradingview_webhook",
-        )
 
         history_item = sanitize_for_json(build_history_item(payload, LAST_VALIDATION))
         ALERT_HISTORY.append(history_item)
 
+        background_tasks.add_task(
+            enqueue_sqs_background,
+            payload,
+            trace_id,
+        )
+
         total_ms = round((time.perf_counter() - t0_total) * 1000, 2)
 
         response_content = sanitize_for_json({
-            "ok": bool(queue_result.get("ok")),
-            "message": (
-                "Alert queued in SQS quickly. Processing deferred."
-                if queue_result.get("ok")
-                else "Alert received but SQS enqueue failed."
-            ),
+            "ok": True,
+            "message": "Alert accepted quickly. SQS enqueue scheduled in background.",
             "trace_id": trace_id,
             "processing_ms": total_ms,
             "event_uid": payload.get("event_uid"),
@@ -146,15 +191,14 @@ async def tradingview_webhook(
             "side": signal.get("side") or payload.get("side"),
             "symbol": signal.get("symbol") or payload.get("symbol") or payload.get("ticker"),
             "queue_backend": "sqs",
-            "queue": queue_result,
-            "background_processing": False,
-            "processing_mode": "sqs_deferred",
+            "background_processing": True,
+            "processing_mode": "fast_ack_sqs_background",
         })
 
         log_trace(trace_id, "webhook_fast_response_sent", response_content)
 
         return JSONResponse(
-            status_code=200 if queue_result.get("ok") else 500,
+            status_code=200,
             content=response_content,
         )
 
