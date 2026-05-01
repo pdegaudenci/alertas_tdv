@@ -7,7 +7,7 @@ Endpoints:
 
 Modo correcto anti-timeout:
 - Recibe alerta.
-- Guarda payload en cola Supabase backend_alert_queue.
+- Envía payload a AWS SQS.
 - Responde rápido.
 - NO ejecuta validación/Supabase operativo/S3/Telegram en el request.
 """
@@ -37,7 +37,7 @@ from app.services.alert_service import (
     assemble_event_payload,
     build_history_item,
 )
-from app.services.alert_queue_service import enqueue_alert_payload
+from app.services.sqs_queue_service import send_alert_to_sqs
 from app.services.error_log_service import persist_backend_error_log
 
 
@@ -59,7 +59,7 @@ async def tradingview_webhook(
             "method": request.method,
             "query_params": dict(request.query_params),
             "client": request.client.host if request.client else None,
-            "mode": "queue_only_fast_ack",
+            "mode": "sqs_fast_ack",
         })
 
         validate_secret(x_webhook_secret)
@@ -105,16 +105,16 @@ async def tradingview_webhook(
         set_validation_queued(payload)
         set_last_alert_fast_ack(payload, trace_id)
 
-        queue_result = await enqueue_alert_payload(
-            payload=payload,
-            trace_id=trace_id,
-            source="tradingview_webhook",
-        )
-
         message_type = str(payload.get("message_type") or "").lower()
 
         if message_type in {"logical_event_core", "logical_event_extra"}:
             set_last_alert_partial(payload)
+
+        queue_result = await send_alert_to_sqs(
+            payload=payload,
+            trace_id=trace_id,
+            source="tradingview_webhook",
+        )
 
         history_item = sanitize_for_json(build_history_item(payload, LAST_VALIDATION))
         ALERT_HISTORY.append(history_item)
@@ -124,9 +124,9 @@ async def tradingview_webhook(
         response_content = sanitize_for_json({
             "ok": bool(queue_result.get("ok")),
             "message": (
-                "Alert queued quickly. Processing deferred."
+                "Alert queued in SQS quickly. Processing deferred."
                 if queue_result.get("ok")
-                else "Alert received but queue insert failed."
+                else "Alert received but SQS enqueue failed."
             ),
             "trace_id": trace_id,
             "processing_ms": total_ms,
@@ -135,9 +135,10 @@ async def tradingview_webhook(
             "event": signal.get("event") or payload.get("event"),
             "side": signal.get("side") or payload.get("side"),
             "symbol": signal.get("symbol") or payload.get("symbol") or payload.get("ticker"),
+            "queue_backend": "sqs",
             "queue": queue_result,
             "background_processing": False,
-            "processing_mode": "queued_deferred",
+            "processing_mode": "sqs_deferred",
         })
 
         log_trace(trace_id, "webhook_fast_response_sent", response_content)

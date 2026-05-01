@@ -102,3 +102,20 @@ service_account_gcs_writer.json
 google-credentials.json
 gcp-credentials.json
 application_default_credentials.json
+
+# AWS credentials / secrets
+.aws/
+aws-credentials.json
+*.pem
+*.key
+.env
+.env.*
+!.env.example
+
+# Local lakehouse exports
+tmp/
+data/
+exports/
+trading_lakehouse/
+*.jsonl
+*.parquet
