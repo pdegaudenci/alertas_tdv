@@ -7,6 +7,7 @@ Endpoints:
 
 Modo correcto anti-timeout:
 - Recibe alerta.
+- Valida secret desde header o payload.secret.
 - Envía payload a AWS SQS.
 - Responde rápido.
 - NO ejecuta validación/Supabase operativo/S3/Telegram en el request.
@@ -62,10 +63,22 @@ async def tradingview_webhook(
             "mode": "sqs_fast_ack",
         })
 
-        validate_secret(x_webhook_secret)
-
         raw_body = await request.body()
         raw_text = raw_body.decode("utf-8", errors="replace")
+
+        t0_parse = time.perf_counter()
+
+        payload_raw = parse_payload(raw_body)
+        payload = assemble_event_payload(payload_raw)
+
+        parse_ms = round((time.perf_counter() - t0_parse) * 1000, 2)
+
+        # TradingView no envía headers personalizados.
+        # Por eso aceptamos también payload.secret.
+        validate_secret(
+            x_webhook_secret=x_webhook_secret,
+            payload_secret=payload.get("secret"),
+        )
 
         debug_mode = str(request.query_params.get("debug", "0")).lower() in {
             "1",
@@ -81,23 +94,20 @@ async def tradingview_webhook(
                     "message": "Webhook debug echo",
                     "received_at": utc_now_iso(),
                     "raw_body_text": raw_text,
+                    "payload": payload,
                 }),
             )
 
-        t0_parse = time.perf_counter()
-
-        payload_raw = parse_payload(raw_body)
-        payload = assemble_event_payload(payload_raw)
-
-        parse_ms = round((time.perf_counter() - t0_parse) * 1000, 2)
-
         log_trace(trace_id, "payload_parsed", {
             "parse_ms": parse_ms,
+            "schema_version": payload.get("schema_version"),
             "message_type": payload.get("message_type"),
             "event_uid": payload.get("event_uid"),
             "event": nested_get(payload, "signal", "event"),
             "side": nested_get(payload, "signal", "side"),
             "symbol": nested_get(payload, "signal", "symbol"),
+            "secret_present": bool(payload.get("secret")),
+            "header_secret_present": bool(x_webhook_secret),
         })
 
         signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
