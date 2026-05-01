@@ -16,7 +16,7 @@ Flujo:
 from typing import Optional, Dict, Any
 import os
 import traceback
-
+import hmac
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
@@ -69,35 +69,14 @@ def _validate_cron_secret(request: Request) -> None:
             detail="CRON_SECRET not configured",
         )
 
-    auth_header = request.headers.get("authorization") or ""
+    auth_header = (request.headers.get("authorization") or "").strip()
     expected_header = f"Bearer {expected}"
 
-    if auth_header != expected_header:
+    if not hmac.compare_digest(auth_header, expected_header):
         raise HTTPException(
             status_code=401,
             detail="Unauthorized cron request",
         )
-
-async def _process_full_payload(
-    payload: Dict[str, Any],
-    trace_id: str,
-    source: str,
-) -> Dict[str, Any]:
-    payload = ensure_canonical_schema(payload)
-
-    await process_alert_background(
-        payload=payload,
-        trace_id=trace_id,
-    )
-
-    return sanitize_for_json({
-        "event_uid": payload.get("event_uid"),
-        "message_type": payload.get("message_type"),
-        "event": payload.get("signal", {}).get("event") if isinstance(payload.get("signal"), dict) else payload.get("event"),
-        "source": source,
-        "validation": LAST_VALIDATION,
-    })
-
 
 async def _process_sqs_alerts_internal(
     limit: int,
@@ -334,10 +313,14 @@ async def process_sqs_alerts_cron(
     trace_id = make_trace_id()
 
     try:
+        safe_limit = max(1, min(int(limit), 10))
+
         response = await _process_sqs_alerts_internal(
-            limit=limit,
+            limit=safe_limit,
             trace_id=trace_id,
         )
+
+        response = sanitize_for_json(response)
 
         log_trace(trace_id, "process_sqs_cron_done", response)
 
@@ -370,8 +353,6 @@ async def process_sqs_alerts_cron(
                 "error": str(e),
             }),
         )
-
-
 @router.get("/api/process/sqs/status")
 async def process_sqs_status(
     x_webhook_secret: Optional[str] = Header(default=None),
