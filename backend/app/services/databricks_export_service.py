@@ -17,6 +17,13 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+import requests
+
+try:
+    import google.auth
+except Exception:
+    google = None
+
 from app.utils.json_utils import sanitize_for_json
 from app.core.logging import log_event
 
@@ -33,6 +40,68 @@ DATABRICKS_EXPORT_BASE_PATH = os.getenv(
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def get_current_gcp_identity() -> Dict[str, Any]:
+    """
+    Obtiene la identidad que está ejecutando el código.
+
+    Funciona en:
+    - Cloud Composer
+    - GCE
+    - Cloud Run
+    - GCP runtime con metadata server
+
+    En local puede devolver service_account_email=None si usas usuario ADC.
+    """
+
+    identity = {
+        "project_id": None,
+        "service_account_email": None,
+        "source": None,
+    }
+
+    try:
+        if google is not None:
+            credentials, project_id = google.auth.default()
+            identity["project_id"] = project_id
+            identity["service_account_email"] = getattr(
+                credentials,
+                "service_account_email",
+                None,
+            )
+            identity["source"] = "google.auth.default"
+    except Exception as e:
+        identity["google_auth_error"] = str(e)
+
+    if not identity.get("service_account_email"):
+        try:
+            url = (
+                "http://metadata.google.internal/computeMetadata/v1/"
+                "instance/service-accounts/default/email"
+            )
+            headers = {"Metadata-Flavor": "Google"}
+
+            response = requests.get(
+                url,
+                headers=headers,
+                timeout=2,
+            )
+
+            if response.ok:
+                identity["service_account_email"] = response.text
+                identity["source"] = "gcp_metadata_server"
+
+        except Exception as e:
+            identity["metadata_error"] = str(e)
+
+    print("CURRENT_GCP_IDENTITY:", json.dumps(identity, indent=2, default=str))
+
+    return identity
+
+
+# Print automático al cargar el módulo
+CURRENT_GCP_IDENTITY = get_current_gcp_identity()
 
 
 def _safe_partition_value(value: Any, default: str = "unknown") -> str:
