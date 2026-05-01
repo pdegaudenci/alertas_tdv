@@ -181,7 +181,7 @@ def normalize_alert(payload: Dict[str, Any]) -> Dict[str, Any]:
     sequence = canonical.get("sequence", {}) if isinstance(canonical.get("sequence"), dict) else {}
     htf_context = canonical.get("htf_context", {}) if isinstance(canonical.get("htf_context"), dict) else {}
     execution = canonical.get("execution", {}) if isinstance(canonical.get("execution"), dict) else {}
-
+    ml_tracking = canonical.get("ml_tracking", {}) if isinstance(canonical.get("ml_tracking"), dict) else {}
     side = str(signal.get("side") or canonical.get("side") or "").lower().strip()
     symbol = str(signal.get("symbol") or canonical.get("symbol") or canonical.get("ticker") or "BTCUSDC").upper().strip()
     event = str(signal.get("event") or canonical.get("event") or "").upper().strip()
@@ -224,6 +224,7 @@ def normalize_alert(payload: Dict[str, Any]) -> Dict[str, Any]:
         "sequence": sequence,
         "htf_context": htf_context,
         "execution": execution,
+        "ml_tracking": ml_tracking,
 
         "symbol": symbol,
         "side": side,
@@ -294,6 +295,24 @@ def normalize_alert(payload: Dict[str, Any]) -> Dict[str, Any]:
         "distance_to_sl_pct_alert": safe_float(trade_plan.get("distance_to_sl_pct") or execution.get("distance_to_sl_pct")),
         "tp_perc_alert": safe_float(trade_plan.get("tp_perc")),
         "sl_perc_alert": safe_float(trade_plan.get("sl_perc")),
+        "track_for_outcome": bool(
+        ml_tracking.get("track_for_outcome")
+        or signal.get("track_for_outcome", False)
+        ),
+        "candidate_type": (
+            ml_tracking.get("candidate_type")
+            or signal.get("candidate_type")
+        ),
+        "labeling_profile": ml_tracking.get("labeling_profile"),
+        "labeling_window_bars": safe_int(ml_tracking.get("labeling_window_bars"), 20),
+        "ambiguous_rule": ml_tracking.get("ambiguous_rule"),
+        "timeout_rule": ml_tracking.get("timeout_rule"),
+        "entry_reference": ml_tracking.get("entry_reference"),
+        "tp_sl_source": ml_tracking.get("tp_sl_source"),
+        "ml_target": ml_tracking.get("ml_target"),
+        "exclude_ambiguous_from_binary": bool(
+            ml_tracking.get("exclude_ambiguous_from_binary", True)
+),
     }
 
 
