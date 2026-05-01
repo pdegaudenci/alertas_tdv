@@ -14,7 +14,7 @@ from app.api.dashboard_routes import router as dashboard_router
 from app.api.validation_routes import router as validation_router
 from app.api.webhook_routes import router as webhook_router
 from app.api.processing_sqs_routes import router as processing_sqs_router
-
+from app.api.processing_sqs_routes import router as processing_sqs_router
 
 app = FastAPI(
     title="TradingView Validation Layer",
@@ -33,4 +33,5 @@ app.include_router(health_router)
 app.include_router(dashboard_router)
 app.include_router(validation_router)
 app.include_router(webhook_router)
+app.include_router(processing_sqs_router)
 app.include_router(processing_sqs_router)
