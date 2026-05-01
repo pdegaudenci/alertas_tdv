@@ -8,6 +8,7 @@ Responsabilidad:
 - Persistir en Supabase.
 - Exportar evento para Databricks/Lakehouse.
 - Actualizar LAST_ALERT con validation y background_processed_at.
+- Registrar errores de procesamiento en Supabase backend_error_logs.
 
 Este servicio no cambia la lógica existente; solo mueve el bloque interno
 process_alert_background fuera de webhook_routes.py.
@@ -31,11 +32,16 @@ from app.services.telegram_service import (
     build_telegram_entry_message,
 )
 from app.services.databricks_export_service import export_event_for_databricks
+from app.services.error_log_service import persist_backend_error_log
 from app.repositories.supabase_repo import persist_to_supabase
 
 
 async def process_alert_background(payload: Dict[str, Any], trace_id: str) -> None:
     validation_result = None
+
+    # ============================================================
+    # 1. VALIDATION
+    # ============================================================
 
     try:
         t0_validation = time.perf_counter()
@@ -105,9 +111,37 @@ async def process_alert_background(payload: Dict[str, Any], trace_id: str) -> No
             "traceback": traceback.format_exc(),
         }, level="ERROR")
 
+        await persist_backend_error_log(
+            stage="bg_validation_error",
+            error=e,
+            trace_id=trace_id,
+            payload=payload,
+            validation_payload=validation_result,
+            route="/api/webhook",
+            context={
+                "component": "webhook_background_service",
+                "operation": "run_validation",
+                "message_type": payload.get("message_type"),
+                "event_uid": payload.get("event_uid"),
+                "event": nested_get(payload, "signal", "event"),
+                "side": nested_get(payload, "signal", "side"),
+                "symbol": nested_get(payload, "signal", "symbol"),
+            },
+        )
+
+    # ============================================================
+    # 2. SUPABASE PERSISTENCE
+    # ============================================================
+
     try:
         t0_supabase = time.perf_counter()
-        await persist_to_supabase(payload, LAST_VALIDATION, trace_id=trace_id)
+
+        await persist_to_supabase(
+            payload,
+            LAST_VALIDATION,
+            trace_id=trace_id,
+        )
+
         supabase_ms = round((time.perf_counter() - t0_supabase) * 1000, 2)
 
         log_trace(trace_id, "bg_supabase_persist_done", {
@@ -119,6 +153,28 @@ async def process_alert_background(payload: Dict[str, Any], trace_id: str) -> No
             "error": str(e),
             "traceback": traceback.format_exc(),
         }, level="ERROR")
+
+        await persist_backend_error_log(
+            stage="bg_supabase_persist_error",
+            error=e,
+            trace_id=trace_id,
+            payload=payload,
+            validation_payload=LAST_VALIDATION,
+            route="/api/webhook",
+            context={
+                "component": "webhook_background_service",
+                "operation": "persist_to_supabase",
+                "message_type": payload.get("message_type"),
+                "event_uid": payload.get("event_uid"),
+                "event": nested_get(payload, "signal", "event"),
+                "side": nested_get(payload, "signal", "side"),
+                "symbol": nested_get(payload, "signal", "symbol"),
+            },
+        )
+
+    # ============================================================
+    # 3. DATABRICKS / LAKEHOUSE EXPORT
+    # ============================================================
 
     try:
         t0_databricks_export = time.perf_counter()
@@ -142,6 +198,28 @@ async def process_alert_background(payload: Dict[str, Any], trace_id: str) -> No
             "traceback": traceback.format_exc(),
         }, level="ERROR")
 
+        await persist_backend_error_log(
+            stage="bg_databricks_export_error",
+            error=e,
+            trace_id=trace_id,
+            payload=payload,
+            validation_payload=LAST_VALIDATION,
+            route="/api/webhook",
+            context={
+                "component": "webhook_background_service",
+                "operation": "export_event_for_databricks",
+                "message_type": payload.get("message_type"),
+                "event_uid": payload.get("event_uid"),
+                "event": nested_get(payload, "signal", "event"),
+                "side": nested_get(payload, "signal", "side"),
+                "symbol": nested_get(payload, "signal", "symbol"),
+            },
+        )
+
+    # ============================================================
+    # 4. LAST_ALERT UPDATE
+    # ============================================================
+
     try:
         if isinstance(LAST_ALERT, dict):
             LAST_ALERT["validation"] = LAST_VALIDATION
@@ -150,4 +228,23 @@ async def process_alert_background(payload: Dict[str, Any], trace_id: str) -> No
     except Exception as e:
         log_trace(trace_id, "bg_last_alert_update_error", {
             "error": str(e),
-        })
+            "traceback": traceback.format_exc(),
+        }, level="ERROR")
+
+        await persist_backend_error_log(
+            stage="bg_last_alert_update_error",
+            error=e,
+            trace_id=trace_id,
+            payload=payload,
+            validation_payload=LAST_VALIDATION,
+            route="/api/webhook",
+            context={
+                "component": "webhook_background_service",
+                "operation": "update_LAST_ALERT",
+                "message_type": payload.get("message_type"),
+                "event_uid": payload.get("event_uid"),
+                "event": nested_get(payload, "signal", "event"),
+                "side": nested_get(payload, "signal", "side"),
+                "symbol": nested_get(payload, "signal", "symbol"),
+            },
+        )

@@ -33,7 +33,7 @@ from app.services.alert_service import (
     build_history_item,
 )
 from app.services.webhook_background_service import process_alert_background
-
+from app.services.error_log_service import persist_backend_error_log
 
 router = APIRouter()
 
@@ -152,7 +152,18 @@ async def tradingview_webhook(
             "traceback": traceback.format_exc(),
             "response": error_response,
         })
-
+        await persist_backend_error_log(
+                stage="webhook_unhandled_exception",
+                error=e,
+                trace_id=trace_id if "trace_id" in locals() else "-",
+                payload=payload if "payload" in locals() and isinstance(payload, dict) else {},
+                route="/api/webhook",
+                context={
+                    "component": "webhook_routes",
+                    "operation": "tradingview_webhook",
+                    "response": error_response,
+                },
+            )
         return JSONResponse(status_code=500, content=error_response)
 
 
