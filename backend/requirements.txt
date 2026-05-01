@@ -9,3 +9,4 @@ supabase
 joblib
 scikit-learn
 google-cloud-storage
+boto3

@@ -1,93 +1,69 @@
 # ============================================================
-# run.ps1
-# Run local FastAPI backend with Databricks/GCS export enabled
+# run_local_s3.ps1
+# Ejecuta backend FastAPI local leyendo variables desde .env
 # ============================================================
 
-Write-Host ""
-Write-Host "========================================="
-Write-Host " RUN - Trading Backend Local"
-Write-Host "========================================="
-Write-Host ""
+Write-Host "Cargando variables desde .env..." -ForegroundColor Cyan
 
-# ------------------------------------------------------------
-# 1. Check current folder
-# ------------------------------------------------------------
+$envFile = ".env"
 
-if (-Not (Test-Path "app")) {
-    Write-Host "ERROR: app/ folder not found."
-    Write-Host "Run this script from the backend/ folder."
+if (-Not (Test-Path $envFile)) {
+    Write-Host "No se encontró archivo .env en la ruta actual." -ForegroundColor Red
+    Write-Host "Crea un archivo .env antes de ejecutar este script." -ForegroundColor Yellow
     exit 1
 }
 
-if (-Not (Test-Path ".venv")) {
-    Write-Host "ERROR: .venv not found."
-    Write-Host "Run setup first:"
-    Write-Host ".\setup.ps1"
+Get-Content $envFile | ForEach-Object {
+    $line = $_.Trim()
+
+    if ($line -eq "") {
+        return
+    }
+
+    if ($line.StartsWith("#")) {
+        return
+    }
+
+    if ($line -notmatch "=") {
+        return
+    }
+
+    $key, $value = $line -split "=", 2
+
+    $key = $key.Trim()
+    $value = $value.Trim()
+
+    # Quitar comillas simples o dobles si existen
+    if (
+        ($value.StartsWith('"') -and $value.EndsWith('"')) -or
+        ($value.StartsWith("'") -and $value.EndsWith("'"))
+    ) {
+        $value = $value.Substring(1, $value.Length - 2)
+    }
+
+    [System.Environment]::SetEnvironmentVariable($key, $value, "Process")
+}
+
+Write-Host "Variables cargadas correctamente." -ForegroundColor Green
+
+Write-Host "Resumen de configuración no sensible:" -ForegroundColor Cyan
+Write-Host "ENABLE_DATABRICKS_EXPORT=$env:ENABLE_DATABRICKS_EXPORT"
+Write-Host "DATABRICKS_EXPORT_TARGET=$env:DATABRICKS_EXPORT_TARGET"
+Write-Host "S3_BUCKET_NAME=$env:S3_BUCKET_NAME"
+Write-Host "S3_BASE_PREFIX=$env:S3_BASE_PREFIX"
+Write-Host "AWS_REGION=$env:AWS_REGION"
+
+if (-not $env:AWS_ACCESS_KEY_ID) {
+    Write-Host "AWS_ACCESS_KEY_ID no está definido." -ForegroundColor Red
     exit 1
 }
 
-# ------------------------------------------------------------
-# 2. Activate virtual environment
-# ------------------------------------------------------------
-
-Write-Host "Activating virtual environment..."
-& ".\.venv\Scripts\Activate.ps1"
-
-# ------------------------------------------------------------
-# 3. GCP credentials path
-# ------------------------------------------------------------
-
-$GcpCredentialsPath = Join-Path (Get-Location) "credentials\service_account_gcs_writer.json"
-
-if (-Not (Test-Path $GcpCredentialsPath)) {
-    Write-Host ""
-    Write-Host "ERROR: GCP credentials file not found:"
-    Write-Host $GcpCredentialsPath
-    Write-Host ""
-    Write-Host "Place your service account JSON in:"
-    Write-Host "backend\credentials\service_account_gcs_writer.json"
-    Write-Host ""
+if (-not $env:AWS_SECRET_ACCESS_KEY) {
+    Write-Host "AWS_SECRET_ACCESS_KEY no está definido." -ForegroundColor Red
     exit 1
 }
 
-# ------------------------------------------------------------
-# 4. Environment variables - Databricks/GCS export
-# ------------------------------------------------------------
-
-$env:ENABLE_DATABRICKS_EXPORT = "true"
-$env:DATABRICKS_EXPORT_TARGET = "gcs"
-$env:GCS_BUCKET_NAME = "trading-lakehouse-btc"
-$env:GCS_BASE_PREFIX = "bronze/trading_alerts"
-$env:GOOGLE_APPLICATION_CREDENTIALS = $GcpCredentialsPath
-
-# ------------------------------------------------------------
-# 5. Optional local backend vars
-# ------------------------------------------------------------
-# Uncomment and adjust if needed:
-#
-# $env:WEBHOOK_SECRET = "MI_SECRET"
-# $env:TELEGRAM_ENABLED = "false"
-# $env:SUPABASE_URL = "https://xxxx.supabase.co"
-# $env:SUPABASE_SERVICE_ROLE_KEY = "xxxx"
-# $env:ALLOWED_ORIGINS = "*"
-
-# ------------------------------------------------------------
-# 6. Show effective config
-# ------------------------------------------------------------
-
-Write-Host "Databricks export enabled: $env:ENABLE_DATABRICKS_EXPORT"
-Write-Host "Databricks export target : $env:DATABRICKS_EXPORT_TARGET"
-Write-Host "GCS bucket                : $env:GCS_BUCKET_NAME"
-Write-Host "GCS prefix                : $env:GCS_BASE_PREFIX"
-Write-Host "GCP credentials           : $env:GOOGLE_APPLICATION_CREDENTIALS"
-Write-Host ""
-
-# ------------------------------------------------------------
-# 7. Run FastAPI
-# ------------------------------------------------------------
-
-Write-Host "Starting FastAPI..."
-Write-Host "URL: http://localhost:8000"
-Write-Host ""
+Write-Host "AWS credentials detectadas en entorno del proceso." -ForegroundColor Green
+Write-Host "Iniciando FastAPI..." -ForegroundColor Cyan
 
 uvicorn app.main:app --reload

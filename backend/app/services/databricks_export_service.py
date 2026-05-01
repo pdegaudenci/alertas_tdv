@@ -1,9 +1,9 @@
 """
 Servicio de exportación para Databricks / Lakehouse.
 
-FASE 2:
+FASE 2 - S3:
 - Soporta export local para pruebas.
-- Soporta export a Google Cloud Storage.
+- Soporta export a AWS S3.
 - Mantiene contrato Bronze.
 - No sustituye Supabase.
 - No afecta validación, Telegram ni dashboard operativo.
@@ -20,9 +20,9 @@ from app.core.config import (
     ENABLE_DATABRICKS_EXPORT,
     DATABRICKS_EXPORT_TARGET,
     DATABRICKS_EXPORT_BASE_PATH,
-    GCS_BASE_PREFIX,
+    S3_BASE_PREFIX,
 )
-from app.services.gcs_storage_service import upload_text_to_gcs
+from app.services.s3_storage_service import upload_text_to_s3
 
 
 def _utc_now() -> datetime:
@@ -89,7 +89,7 @@ def _build_relative_object_path(payload: Dict[str, Any]) -> str:
     filename = f"event_{event_uid}_{now.strftime('%Y%m%dT%H%M%S%f')}.jsonl"
 
     return "/".join([
-        GCS_BASE_PREFIX.strip("/"),
+        S3_BASE_PREFIX.strip("/"),
         f"processing_date={p['processing_date']}",
         f"symbol={p['symbol']}",
         f"tf={p['tf']}",
@@ -203,25 +203,24 @@ def _export_local(
     }
 
 
-def _export_gcs(
+def _export_s3(
     payload: Dict[str, Any],
     bronze_event: Dict[str, Any],
     trace_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     object_name = _build_relative_object_path(payload)
-
     content = json.dumps(bronze_event, ensure_ascii=False, default=str) + "\n"
 
-    upload_result = upload_text_to_gcs(
+    upload_result = upload_text_to_s3(
         object_name=object_name,
         content=content,
         content_type="application/x-ndjson",
     )
 
     if upload_result.get("ok"):
-        log_event("databricks_export_gcs_success", {
+        log_event("databricks_export_s3_success", {
             "trace_id": trace_id,
-            "gcs_uri": upload_result.get("gcs_uri"),
+            "s3_uri": upload_result.get("s3_uri"),
             "event_uid": payload.get("event_uid"),
             "message_type": payload.get("message_type"),
         })
@@ -229,12 +228,12 @@ def _export_gcs(
         return {
             "ok": True,
             "exported": True,
-            "target": "gcs",
-            "gcs_uri": upload_result.get("gcs_uri"),
+            "target": "s3",
+            "s3_uri": upload_result.get("s3_uri"),
             "layer": "bronze",
         }
 
-    log_event("databricks_export_gcs_error", {
+    log_event("databricks_export_s3_error", {
         "trace_id": trace_id,
         "error": upload_result.get("error"),
         "event_uid": payload.get("event_uid"),
@@ -244,7 +243,7 @@ def _export_gcs(
     return {
         "ok": False,
         "exported": False,
-        "target": "gcs",
+        "target": "s3",
         "error": upload_result.get("error"),
     }
 
@@ -268,8 +267,8 @@ def export_event_for_databricks(
             trace_id=trace_id,
         )
 
-        if DATABRICKS_EXPORT_TARGET == "gcs":
-            return _export_gcs(
+        if DATABRICKS_EXPORT_TARGET == "s3":
+            return _export_s3(
                 payload=payload,
                 bronze_event=bronze_event,
                 trace_id=trace_id,

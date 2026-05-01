@@ -84,3 +84,28 @@ GCP_SERVICE_ACCOUNT_JSON_BASE64 = os.getenv(
     "GCP_SERVICE_ACCOUNT_JSON_BASE64",
     ""
 ).strip()
+
+# ============================================================
+# AWS S3 / DATABRICKS LAKEHOUSE EXPORT
+# ============================================================
+
+ENABLE_DATABRICKS_EXPORT = os.getenv("ENABLE_DATABRICKS_EXPORT", "false").lower() == "true"
+
+DATABRICKS_EXPORT_TARGET = os.getenv(
+    "DATABRICKS_EXPORT_TARGET",
+    "local"
+).strip().lower()
+
+DATABRICKS_EXPORT_BASE_PATH = os.getenv(
+    "DATABRICKS_EXPORT_BASE_PATH",
+    "/tmp/trading_lakehouse"
+)
+
+AWS_REGION = os.getenv("AWS_REGION", "eu-west-1").strip()
+
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "").strip()
+
+S3_BASE_PREFIX = os.getenv(
+    "S3_BASE_PREFIX",
+    "bronze/trading_alerts"
+).strip().strip("/")
