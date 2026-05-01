@@ -56,3 +56,31 @@ try:
 except Exception:
     SKLEARN_MODEL = None
     SKLEARN_FEATURE_ORDER = []
+
+# ============================================================
+# DATABRICKS / LAKEHOUSE EXPORT
+# ============================================================
+
+ENABLE_DATABRICKS_EXPORT = os.getenv("ENABLE_DATABRICKS_EXPORT", "false").lower() == "true"
+
+DATABRICKS_EXPORT_TARGET = os.getenv(
+    "DATABRICKS_EXPORT_TARGET",
+    "local"
+).strip().lower()
+
+DATABRICKS_EXPORT_BASE_PATH = os.getenv(
+    "DATABRICKS_EXPORT_BASE_PATH",
+    "/tmp/trading_lakehouse"
+)
+
+GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME", "").strip()
+
+GCS_BASE_PREFIX = os.getenv(
+    "GCS_BASE_PREFIX",
+    "bronze/trading_alerts"
+).strip().strip("/")
+
+GCP_SERVICE_ACCOUNT_JSON_BASE64 = os.getenv(
+    "GCP_SERVICE_ACCOUNT_JSON_BASE64",
+    ""
+).strip()

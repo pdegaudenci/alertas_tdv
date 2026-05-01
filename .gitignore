@@ -89,3 +89,16 @@ trading_lakehouse/
 Thumbs.db
 .vscode/
 .idea/
+
+# Credentials
+credentials/
+backend/credentials/
+*.pem
+*.key
+*.p12
+service_account*.json
+*_service_account.json
+service_account_gcs_writer.json
+google-credentials.json
+gcp-credentials.json
+application_default_credentials.json
