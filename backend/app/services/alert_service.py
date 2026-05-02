@@ -129,14 +129,36 @@ def assemble_event_payload(payload_raw: Dict[str, Any]) -> Dict[str, Any]:
 
 def should_validate_payload(payload: Dict[str, Any]) -> bool:
     signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
-    event = str(signal.get("event") or payload.get("event") or "").upper()
-    message_type = str(payload.get("message_type") or "").lower()
 
-    return message_type in {"logical_event_core", "logical_event_full"} and event in {
-        "LONG_ENTRY",
-        "SHORT_ENTRY",
+    event = str(
+        signal.get("event")
+        or payload.get("event")
+        or ""
+    ).upper().strip()
+
+    message_type = str(
+        payload.get("message_type")
+        or ""
+    ).lower().strip()
+
+    valid_message_types = {
+        "logical_event_full",
+        "logical_event_core",
+        "executed_event",
     }
 
+    valid_events = {
+        "LONG_INIT",
+        "SHORT_INIT",
+        "LONG_ENTRY",
+        "SHORT_ENTRY",
+        "REAL_LONG_ENTRY",
+        "REAL_SHORT_ENTRY",
+        "IMP_UP_AFTER_ADAPTIVE",
+        "IMP_DN_AFTER_ADAPTIVE",
+    }
+
+    return message_type in valid_message_types and event in valid_events
 
 def build_log(route: str, payload: dict, headers: dict | None = None) -> dict:
     canonical = ensure_canonical_schema(payload)
@@ -200,9 +222,9 @@ def normalize_alert(payload: Dict[str, Any]) -> Dict[str, Any]:
     sl_price = safe_float(trade_plan.get("sl_price") or execution.get("sl_price"))
 
     if side not in {"long", "short"}:
-        if "LONG" in event:
+        if "LONG" in event or "IMP_UP" in event:
             side = "long"
-        elif "SHORT" in event:
+        elif "SHORT" in event or "IMP_DN" in event:
             side = "short"
 
     return {

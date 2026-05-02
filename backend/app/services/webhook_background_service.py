@@ -10,8 +10,17 @@ Responsabilidad:
 - Actualizar LAST_ALERT con validation y background_processed_at.
 - Registrar errores de procesamiento en Supabase backend_error_logs.
 
-Este servicio no cambia la lógica existente; solo mueve el bloque interno
-process_alert_background fuera de webhook_routes.py.
+IMPORTANTE:
+- Este servicio puede ser reutilizado desde FastAPI, Lambda, scripts locales o tests.
+- No depende de Request, BackgroundTasks ni Response.
+- Devuelve un dict con estado para que Lambda/SQS pueda decidir si reintentar o no.
+
+Regla de errores:
+- Validación: crítico.
+- Supabase: crítico.
+- Export S3/Databricks: crítico.
+- Telegram: no crítico.
+- LAST_ALERT update: no crítico.
 """
 
 from typing import Any, Dict
@@ -36,7 +45,7 @@ from app.services.error_log_service import persist_backend_error_log
 from app.repositories.supabase_repo import persist_to_supabase
 
 
-async def process_alert_background(payload: Dict[str, Any], trace_id: str) -> None:
+async def process_alert_background(payload: Dict[str, Any], trace_id: str) -> Dict[str, Any]:
     validation_result = None
 
     # ============================================================
@@ -67,7 +76,9 @@ async def process_alert_background(payload: Dict[str, Any], trace_id: str) -> No
                     "confidence": 0,
                     "probability_tp_before_sl": None,
                     "score_external": None,
-                    "reason": [f"validation_skipped_for_message_type:{payload.get('message_type')}"],
+                    "reason": [
+                        f"validation_skipped_for_message_type:{payload.get('message_type')}"
+                    ],
                     "penalties": [],
                     "event_type": nested_get(payload, "signal", "event"),
                 },
@@ -82,18 +93,6 @@ async def process_alert_background(payload: Dict[str, Any], trace_id: str) -> No
 
         LAST_VALIDATION.clear()
         LAST_VALIDATION.update(sanitize_for_json(validation_result))
-
-        validation_block = LAST_VALIDATION.get("validation", {}) if isinstance(LAST_VALIDATION, dict) else {}
-
-        if validation_block.get("approve") is True:
-            telegram_text = build_telegram_entry_message(LAST_VALIDATION)
-            send_telegram_message(telegram_text, trace_id=trace_id)
-        else:
-            log_trace(trace_id, "telegram_not_sent", {
-                "reason": "entry_not_approved",
-                "approve": validation_block.get("approve"),
-                "confidence": validation_block.get("confidence"),
-            })
 
     except Exception as e:
         validation_result = {
@@ -129,8 +128,58 @@ async def process_alert_background(payload: Dict[str, Any], trace_id: str) -> No
             },
         )
 
+        return {
+            "ok": False,
+            "critical_error": True,
+            "stage": "bg_validation_error",
+            "error": str(e),
+            "validation": sanitize_for_json(LAST_VALIDATION),
+        }
+
     # ============================================================
-    # 2. SUPABASE PERSISTENCE
+    # 2. TELEGRAM NOTIFICATION
+    # ============================================================
+    # No crítico: si falla Telegram, NO debe provocar retry completo de SQS.
+
+    try:
+        validation_block = LAST_VALIDATION.get("validation", {}) if isinstance(LAST_VALIDATION, dict) else {}
+
+        if validation_block.get("approve") is True:
+            telegram_text = build_telegram_entry_message(LAST_VALIDATION)
+            send_telegram_message(telegram_text, trace_id=trace_id)
+        else:
+            log_trace(trace_id, "telegram_not_sent", {
+                "reason": "entry_not_approved",
+                "approve": validation_block.get("approve"),
+                "confidence": validation_block.get("confidence"),
+            })
+
+    except Exception as e:
+        log_trace(trace_id, "bg_telegram_error_non_critical", {
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+        }, level="ERROR")
+
+        await persist_backend_error_log(
+            stage="bg_telegram_error_non_critical",
+            error=e,
+            trace_id=trace_id,
+            payload=payload,
+            validation_payload=LAST_VALIDATION,
+            route="/api/webhook",
+            context={
+                "component": "webhook_background_service",
+                "operation": "send_telegram_message",
+                "message_type": payload.get("message_type"),
+                "event_uid": payload.get("event_uid"),
+                "event": nested_get(payload, "signal", "event"),
+                "side": nested_get(payload, "signal", "side"),
+                "symbol": nested_get(payload, "signal", "symbol"),
+            },
+        )
+
+    # ============================================================
+    # 3. SUPABASE PERSISTENCE
     # ============================================================
 
     try:
@@ -172,8 +221,17 @@ async def process_alert_background(payload: Dict[str, Any], trace_id: str) -> No
             },
         )
 
+        return {
+            "ok": False,
+            "critical_error": True,
+            "stage": "bg_supabase_persist_error",
+            "error": str(e),
+            "validation": sanitize_for_json(LAST_VALIDATION),
+        }
+
+
     # ============================================================
-    # 3. DATABRICKS / LAKEHOUSE EXPORT
+    # 4. DATABRICKS / LAKEHOUSE EXPORT
     # ============================================================
 
     try:
@@ -186,6 +244,19 @@ async def process_alert_background(payload: Dict[str, Any], trace_id: str) -> No
         )
 
         databricks_export_ms = round((time.perf_counter() - t0_databricks_export) * 1000, 2)
+
+        if not isinstance(databricks_export_result, dict):
+            raise RuntimeError({
+                "stage": "bg_databricks_export_invalid_result",
+                "error": "export_event_for_databricks returned non-dict result",
+                "result_type": str(type(databricks_export_result)),
+            })
+
+        if databricks_export_result.get("ok") is not True:
+            raise RuntimeError({
+                "stage": "bg_databricks_export_failed",
+                "result": databricks_export_result,
+            })
 
         log_trace(trace_id, "bg_databricks_export_done", {
             "ms": databricks_export_ms,
@@ -216,23 +287,31 @@ async def process_alert_background(payload: Dict[str, Any], trace_id: str) -> No
             },
         )
 
+        return {
+            "ok": False,
+            "critical_error": True,
+            "stage": "bg_databricks_export_error",
+            "error": str(e),
+            "validation": sanitize_for_json(LAST_VALIDATION),
+        }
     # ============================================================
-    # 4. LAST_ALERT UPDATE
+    # 5. LAST_ALERT UPDATE
     # ============================================================
+    # No crítico: si falla, no debe forzar retry SQS.
 
     try:
         if isinstance(LAST_ALERT, dict):
-            LAST_ALERT["validation"] = LAST_VALIDATION
+            LAST_ALERT["validation"] = sanitize_for_json(LAST_VALIDATION)
             LAST_ALERT["background_processed_at"] = utc_now_iso()
 
     except Exception as e:
-        log_trace(trace_id, "bg_last_alert_update_error", {
+        log_trace(trace_id, "bg_last_alert_update_error_non_critical", {
             "error": str(e),
             "traceback": traceback.format_exc(),
         }, level="ERROR")
 
         await persist_backend_error_log(
-            stage="bg_last_alert_update_error",
+            stage="bg_last_alert_update_error_non_critical",
             error=e,
             trace_id=trace_id,
             payload=payload,
@@ -248,3 +327,10 @@ async def process_alert_background(payload: Dict[str, Any], trace_id: str) -> No
                 "symbol": nested_get(payload, "signal", "symbol"),
             },
         )
+
+    return {
+        "ok": True,
+        "critical_error": False,
+        "stage": "completed",
+        "validation": sanitize_for_json(LAST_VALIDATION),
+    }

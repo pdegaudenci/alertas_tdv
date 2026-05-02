@@ -43,7 +43,25 @@ from app.services.probability_service import estimate_tp_before_sl_probability
 
 from app.core.config import VALIDATION_THRESHOLD, MIN_SCORE_THRESHOLD
 from app.core.logging import log_event
+# ============================================================
+# EVENT TYPES
+# ============================================================
 
+FULL_VALIDATION_EVENTS = {
+    "LONG_INIT",
+    "SHORT_INIT",
+    "LONG_ENTRY",
+    "SHORT_ENTRY",
+    "REAL_LONG_ENTRY",
+    "REAL_SHORT_ENTRY",
+}
+
+IMPULSE_EVENTS_ALLOWED_FOR_TRACKING = {
+    "IMP_UP_AFTER_ADAPTIVE",
+    "IMP_DN_AFTER_ADAPTIVE",
+}
+
+VALIDATION_ALLOWED_EVENTS = FULL_VALIDATION_EVENTS | IMPULSE_EVENTS_ALLOWED_FOR_TRACKING
 
 # ============================================================
 # VALIDATION HELPERS
@@ -151,7 +169,7 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
     signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
     event = str(signal.get("event") or payload.get("event") or "").upper()
 
-    if event not in {"LONG_ENTRY", "SHORT_ENTRY", "REAL_LONG_ENTRY", "REAL_SHORT_ENTRY"}:
+    if event not in FULL_VALIDATION_EVENTS:
         result = {
             "ok": True,
             "validated_at": utc_now_iso(),
@@ -167,21 +185,17 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "validation_steps": {
                     "event_gate": build_validation_step(
                         ok=False,
-                        reason=f"event {event} is not an entry event",
+                        reason=f"event {event} is not eligible for full validation",
                         details={
                             "event": event,
-                            "entry_events_allowed": [
-                                "LONG_ENTRY",
-                                "SHORT_ENTRY",
-                                "REAL_LONG_ENTRY",
-                                "REAL_SHORT_ENTRY"
-                            ]
+                            "full_validation_events_allowed": sorted(list(FULL_VALIDATION_EVENTS)),
+                            "tracking_only_events": sorted(list(IMPULSE_EVENTS_ALLOWED_FOR_TRACKING)),
                         }
                     )
                 },
                 "analysis_trace": [
                     f"Evento recibido: {event}.",
-                    "No es un evento de entrada, por lo tanto no se ejecuta validación completa."
+                    "No es un evento elegible para validación completa."
                 ],
                 "analysis_summary": {
                     "market_context": "No evaluado para este tipo de evento.",
@@ -193,7 +207,6 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
             }
         }
         return sanitize_for_json(result)
-
     normalized = normalize_alert(payload)
 
     if normalized["side"] not in {"long", "short"}:
@@ -234,18 +247,18 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
     # EVENT GATE
     # ========================================================
     event_upper = str(normalized.get("event", "")).upper()
-    entry_events = {"LONG_ENTRY", "SHORT_ENTRY", "REAL_LONG_ENTRY", "REAL_SHORT_ENTRY"}
+    entry_events = FULL_VALIDATION_EVENTS
 
     validation_steps["event_gate"] = build_validation_step(
         ok=event_upper in entry_events,
         reason=(
-            "entry event eligible for full validation"
+            "event eligible for full validation"
             if event_upper in entry_events
-            else f"event {event_upper} is not an entry event"
+            else f"event {event_upper} is not eligible for full validation"
         ),
         details={
             "event": event_upper,
-            "entry_events_allowed": sorted(list(entry_events))
+            "full_validation_events_allowed": sorted(list(entry_events))
         }
     )
 

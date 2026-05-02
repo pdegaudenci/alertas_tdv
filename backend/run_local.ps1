@@ -1,19 +1,60 @@
+# run_local.ps1
+
+```powershell
 # ============================================================
-# run_local_s3.ps1
-# Ejecuta backend FastAPI local leyendo variables desde .env
+# run_local.ps1
+# Ejecución local del backend TradingView Validation Layer
+#
+# Objetivo:
+# - Activar entorno virtual
+# - Cargar variables desde .env sin imprimir valores sensibles
+# - Validar configuración mínima
+# - Levantar FastAPI con uvicorn
 # ============================================================
 
-Write-Host "Cargando variables desde .env..." -ForegroundColor Cyan
+$ErrorActionPreference = "Stop"
 
-$envFile = ".env"
+Write-Host ""
+Write-Host "============================================================"
+Write-Host " TradingView Validation Layer - Local Run"
+Write-Host "============================================================"
+Write-Host ""
 
-if (-Not (Test-Path $envFile)) {
-    Write-Host "No se encontró archivo .env en la ruta actual." -ForegroundColor Red
-    Write-Host "Crea un archivo .env antes de ejecutar este script." -ForegroundColor Yellow
+# ============================================================
+# 1. Validar entorno virtual
+# ============================================================
+
+$activatePath = ".\.venv\Scripts\Activate.ps1"
+
+if (-not (Test-Path $activatePath)) {
+    Write-Host "[ERROR] No existe .venv."
+    Write-Host "Ejecuta primero:"
+    Write-Host "  .\setup_local.ps1"
     exit 1
 }
 
-Get-Content $envFile | ForEach-Object {
+Write-Host "[INFO] Activando entorno virtual..."
+. $activatePath
+
+# ============================================================
+# 2. Validar archivo .env
+# ============================================================
+
+if (-not (Test-Path ".env")) {
+    Write-Host "[ERROR] No existe archivo .env."
+    Write-Host "Ejecuta primero:"
+    Write-Host "  .\setup_local.ps1"
+    Write-Host "Luego completa los valores necesarios en .env."
+    exit 1
+}
+
+# ============================================================
+# 3. Cargar variables desde .env sin mostrar valores
+# ============================================================
+
+Write-Host "[INFO] Cargando variables de entorno desde .env..."
+
+Get-Content ".env" | ForEach-Object {
     $line = $_.Trim()
 
     if ($line -eq "") {
@@ -28,42 +69,112 @@ Get-Content $envFile | ForEach-Object {
         return
     }
 
-    $key, $value = $line -split "=", 2
+    $parts = $line.Split("=", 2)
+    $name = $parts[0].Trim()
+    $value = $parts[1].Trim()
 
-    $key = $key.Trim()
-    $value = $value.Trim()
-
-    # Quitar comillas simples o dobles si existen
-    if (
-        ($value.StartsWith('"') -and $value.EndsWith('"')) -or
-        ($value.StartsWith("'") -and $value.EndsWith("'"))
-    ) {
-        $value = $value.Substring(1, $value.Length - 2)
+    if ($name -ne "") {
+        [System.Environment]::SetEnvironmentVariable($name, $value, "Process")
     }
-
-    [System.Environment]::SetEnvironmentVariable($key, $value, "Process")
 }
 
-Write-Host "Variables cargadas correctamente." -ForegroundColor Green
+Write-Host "[INFO] Variables cargadas correctamente."
+Write-Host "[INFO] No se muestran valores sensibles por seguridad."
 
-Write-Host "Resumen de configuración no sensible:" -ForegroundColor Cyan
-Write-Host "ENABLE_DATABRICKS_EXPORT=$env:ENABLE_DATABRICKS_EXPORT"
-Write-Host "DATABRICKS_EXPORT_TARGET=$env:DATABRICKS_EXPORT_TARGET"
-Write-Host "S3_BUCKET_NAME=$env:S3_BUCKET_NAME"
-Write-Host "S3_BASE_PREFIX=$env:S3_BASE_PREFIX"
-Write-Host "AWS_REGION=$env:AWS_REGION"
+# ============================================================
+# 4. Validar variables mínimas sin imprimir valores
+# ============================================================
 
-if (-not $env:AWS_ACCESS_KEY_ID) {
-    Write-Host "AWS_ACCESS_KEY_ID no está definido." -ForegroundColor Red
+Write-Host ""
+Write-Host "[INFO] Validando configuración mínima..."
+
+$requiredVars = @(
+    "WEBHOOK_SECRET",
+    "SUPABASE_URL",
+    "SUPABASE_SERVICE_ROLE_KEY"
+)
+
+$optionalVars = @(
+    "AWS_REGION",
+    "SQS_QUEUE_URL",
+    "S3_BUCKET_NAME",
+    "S3_BASE_PREFIX",
+    "TELEGRAM_ENABLED",
+    "ENABLE_DATABRICKS_EXPORT",
+    "DATABRICKS_EXPORT_TARGET"
+)
+
+$missingRequired = @()
+
+foreach ($varName in $requiredVars) {
+    $value = [System.Environment]::GetEnvironmentVariable($varName, "Process")
+
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        Write-Host "[MISSING] $varName"
+        $missingRequired += $varName
+    }
+    else {
+        Write-Host "[OK] $varName configurada"
+    }
+}
+
+foreach ($varName in $optionalVars) {
+    $value = [System.Environment]::GetEnvironmentVariable($varName, "Process")
+
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        Write-Host "[WARN] $varName no configurada"
+    }
+    else {
+        Write-Host "[OK] $varName configurada"
+    }
+}
+
+if ($missingRequired.Count -gt 0) {
+    Write-Host ""
+    Write-Host "[ERROR] Faltan variables obligatorias."
+    Write-Host "Edita .env y completa las variables marcadas como MISSING."
     exit 1
 }
 
-if (-not $env:AWS_SECRET_ACCESS_KEY) {
-    Write-Host "AWS_SECRET_ACCESS_KEY no está definido." -ForegroundColor Red
+# ============================================================
+# 5. Test de importación
+# ============================================================
+
+Write-Host ""
+Write-Host "[INFO] Probando importación de FastAPI app..."
+
+python -c "from app.main import app; print('Import OK')"
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[ERROR] Falló la importación de app.main."
     exit 1
 }
 
-Write-Host "AWS credentials detectadas en entorno del proceso." -ForegroundColor Green
-Write-Host "Iniciando FastAPI..." -ForegroundColor Cyan
+# ============================================================
+# 6. Ejecutar backend local
+# ============================================================
 
-uvicorn app.main:app --reload
+$hostAddress = "127.0.0.1"
+$port = "8000"
+
+Write-Host ""
+Write-Host "============================================================"
+Write-Host " Iniciando backend local"
+Write-Host "============================================================"
+Write-Host ""
+Write-Host "URL local:"
+Write-Host "  http://$hostAddress`:$port"
+Write-Host ""
+Write-Host "Endpoints útiles:"
+Write-Host "  GET  http://$hostAddress`:$port/"
+Write-Host "  GET  http://$hostAddress`:$port/api/latest"
+Write-Host "  GET  http://$hostAddress`:$port/api/validation/latest"
+Write-Host "  GET  http://$hostAddress`:$port/api/health/binance"
+Write-Host "  GET  http://$hostAddress`:$port/api/health/supabase"
+Write-Host "  POST http://$hostAddress`:$port/api/webhook"
+Write-Host ""
+Write-Host "Presiona CTRL+C para detener."
+Write-Host ""
+
+python -m uvicorn app.main:app --host $hostAddress --port $port --reload
+```

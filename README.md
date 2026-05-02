@@ -2261,3 +2261,1082 @@ La arquitectura de datos queda separada así:
 Supabase = operación y dashboard
 S3 + Databricks = analítica, histórico masivo, ML y backtesting
 ```
+
+## X. Nuevas funcionalidades y servicios AWS incorporados
+
+### Problema que surgió
+
+Durante la evolución del sistema apareció un problema operativo y arquitectónico importante: el webhook de TradingView no debía ejecutar procesamiento pesado dentro del mismo request.
+
+TradingView envía alertas en tiempo real y espera una respuesta rápida. Si el backend intenta ejecutar validación, consultas externas, persistencia, notificaciones y exportación analítica dentro del mismo flujo síncrono, aumenta el riesgo de:
+
+```text
+- timeout del webhook
+- pérdida de alertas
+- latencia excesiva
+- bloqueo del flujo si falla Supabase
+- bloqueo del flujo si falla Telegram
+- bloqueo del flujo si falla la exportación a S3
+- acoplamiento excesivo entre recepción, validación, persistencia y analítica
+```
+
+El flujo anterior podía terminar mezclando demasiadas responsabilidades en una sola ejecución:
+
+```text
+recepción de alerta
+  ↓
+validación
+  ↓
+consulta a Binance
+  ↓
+scoring
+  ↓
+persistencia en Supabase
+  ↓
+notificación Telegram
+  ↓
+exportación analítica
+```
+
+Esto no era adecuado para señales de trading en temporalidad de 1 minuto, donde la prioridad es recibir la alerta, validar lo mínimo necesario, encolarla y responder rápido.
+
+---
+
+### Solución implementada
+
+La solución fue evolucionar el sistema hacia una arquitectura desacoplada y orientada a eventos usando servicios AWS.
+
+El flujo actualizado queda así:
+
+```text
+TradingView / Pine Script
+        ↓
+FastAPI / Vercel /api/webhook
+        ↓
+validación rápida + parseo + normalización
+        ↓
+AWS SQS
+        ↓
+AWS Lambda Consumer
+        ↓
+ensamblado CORE + EXTRA
+        ↓
+validación + Binance + scoring + probabilidad TP/SL
+        ├────────────→ Supabase operacional
+        ├────────────→ Telegram si approve=true
+        └────────────→ AWS S3 Bronze
+                                ↓
+                         Databricks Auto Loader
+                                ↓
+                       Bronze / Silver / Gold
+                                ↓
+                     Analytics / ML / Backtesting
+```
+
+Con este cambio, el webhook deja de ser responsable del procesamiento pesado y se convierte en una capa rápida de ingesta.
+
+---
+
+## X.1 Objetivo de la nueva arquitectura AWS
+
+La nueva arquitectura AWS incorporada tiene los siguientes objetivos:
+
+```text
+- evitar timeouts de TradingView
+- desacoplar ingesta y procesamiento
+- permitir reintentos automáticos
+- conservar mensajes fallidos en DLQ
+- ensamblar correctamente logical_event_core + logical_event_extra
+- ejecutar validaciones pesadas fuera del webhook
+- persistir resultados operativos en Supabase
+- exportar eventos validados a S3
+- alimentar Databricks desde S3
+- preparar datos para analytics, ML y backtesting
+```
+
+---
+
+## X.2 Servicios AWS incorporados
+
+En esta fase se trabajaron e incorporaron los siguientes servicios AWS:
+
+```text
+1. AWS SQS
+2. AWS SQS Dead Letter Queue
+3. AWS Lambda
+4. AWS S3
+5. AWS IAM
+6. AWS ECR / Lambda Container Image
+```
+
+---
+
+## X.3 AWS SQS — Cola principal de alertas
+
+### Problema resuelto
+
+El backend necesitaba responder rápido a TradingView sin depender de la duración de la validación ni de servicios externos.
+
+### Solución
+
+Se incorporó AWS SQS como cola desacoplada entre el webhook y el procesamiento pesado.
+
+Cola principal:
+
+```text
+trading-alerts-queue
+```
+
+### Responsabilidad de SQS
+
+```text
+- recibir mensajes generados por el webhook
+- actuar como buffer de alertas
+- desacoplar FastAPI del consumidor
+- permitir reintentos
+- absorber picos pequeños de tráfico
+- evitar pérdida inmediata si el consumidor no está disponible
+```
+
+### Flujo con SQS
+
+```text
+FastAPI /api/webhook
+        ↓
+SendMessage
+        ↓
+trading-alerts-queue
+        ↓
+Lambda Consumer
+```
+
+### Beneficios obtenidos
+
+```text
+- el webhook responde rápido
+- el procesamiento queda fuera del request de TradingView
+- se reduce el riesgo de timeout
+- se mejora la robustez
+- se prepara el sistema para escalar consumidores
+```
+
+---
+
+## X.4 AWS SQS DLQ — Dead Letter Queue
+
+### Problema resuelto
+
+Si un mensaje falla varias veces durante su procesamiento, no debe perderse ni bloquear indefinidamente el flujo principal.
+
+### Solución
+
+Se configuró una Dead Letter Queue asociada a la cola principal.
+
+Cola DLQ:
+
+```text
+trading-alerts-dlq
+```
+
+### Responsabilidad de la DLQ
+
+```text
+- almacenar mensajes que fallan repetidamente
+- permitir análisis posterior del error
+- facilitar replay manual
+- evitar que mensajes problemáticos bloqueen la cola principal
+```
+
+### Casos típicos que pueden terminar en DLQ
+
+```text
+- payload corrupto
+- error persistente de schema
+- fallo repetido de validación crítica
+- fallo repetido de Supabase
+- fallo repetido de S3
+- error no controlado en Lambda
+```
+
+---
+
+## X.5 AWS Lambda — Consumidor desacoplado de SQS
+
+### Problema resuelto
+
+Vercel Cron no era suficiente para consumir SQS con la frecuencia necesaria, ya que el plan actual limita las ejecuciones de cron y no sirve para señales de trading casi en tiempo real.
+
+### Solución
+
+Se incorporó AWS Lambda como consumidor nativo de SQS.
+
+Lambda creada:
+
+```text
+trading-alerts-consumer
+```
+
+### Responsabilidad de Lambda
+
+```text
+- activarse automáticamente cuando llegan mensajes a SQS
+- leer mensajes de la cola
+- procesar cada record recibido
+- fusionar fragmentos CORE y EXTRA si aplica
+- ejecutar process_alert_background()
+- persistir en Supabase
+- exportar a S3
+- enviar Telegram si corresponde
+- devolver batchItemFailures si un mensaje falla
+```
+
+### Beneficios frente a Vercel Cron
+
+```text
+- ejecución automática por evento
+- menor latencia
+- no depende de cron cada minuto
+- reintentos gestionados por AWS
+- integración nativa con SQS
+- escalado administrado
+- mejor separación de responsabilidades
+```
+
+### Comportamiento validado
+
+Se validó el siguiente flujo:
+
+```text
+logical_event_core recibido
+        ↓
+se guarda fragmento
+        ↓
+status = WAITING_PAIR
+        ↓
+logical_event_extra recibido
+        ↓
+se completa el par
+        ↓
+status = READY
+        ↓
+se construye logical_event_full
+        ↓
+se ejecuta validación
+        ↓
+se persiste en Supabase
+        ↓
+se exporta a S3
+        ↓
+status = PROCESSED
+```
+
+---
+
+## X.6 Lambda Container Image
+
+### Problema resuelto
+
+El paquete ZIP de Lambda superó los límites prácticos de tamaño debido a dependencias pesadas como:
+
+```text
+numpy
+pandas
+scipy
+scikit-learn
+joblib
+fastapi
+supabase
+httpx
+boto3
+```
+
+Además, al empaquetar desde Windows aparecieron errores de compatibilidad binaria, por ejemplo con NumPy.
+
+### Solución
+
+Se migró el despliegue de Lambda hacia imagen Docker / Lambda Container Image.
+
+### Beneficios
+
+```text
+- evita límite estricto del ZIP
+- permite dependencias pesadas
+- evita problemas de binarios Windows/Linux
+- permite empaquetado reproducible
+- facilita despliegue vía ECR
+```
+
+### Flujo de despliegue containerizado
+
+```text
+Docker build
+        ↓
+Docker tag
+        ↓
+Push a AWS ECR
+        ↓
+Lambda usa imagen desde ECR
+```
+
+### Resultado
+
+Lambda quedó ejecutando el consumidor con dependencias compatibles con el runtime Linux de AWS.
+
+---
+
+## X.7 AWS ECR — Repositorio para imagen Lambda
+
+### Problema resuelto
+
+Para usar Lambda con imagen de contenedor, era necesario almacenar la imagen Docker en un registro compatible con AWS.
+
+### Solución
+
+Se usó AWS ECR como repositorio de imágenes.
+
+### Responsabilidad de ECR
+
+```text
+- almacenar la imagen Docker del consumidor
+- versionar imágenes por tag
+- servir la imagen a Lambda
+- permitir despliegues reproducibles
+```
+
+### Imagen objetivo
+
+```text
+trading-alerts-consumer
+```
+
+### Flujo conceptual
+
+```text
+local Docker image
+        ↓
+AWS ECR repository
+        ↓
+AWS Lambda function
+```
+
+---
+
+## X.8 Fragment Store para CORE + EXTRA
+
+### Problema resuelto
+
+TradingView puede enviar `logical_event_core` y `logical_event_extra` como mensajes separados. Estos fragmentos pueden llegar:
+
+```text
+- en distinto orden
+- en distintos mensajes SQS
+- con segundos de diferencia
+- incluso reintentados
+```
+
+Si se ejecuta la validación con solo CORE o solo EXTRA, faltan campos relevantes de contexto, movimiento, liquidez, estructura y HTF.
+
+### Solución
+
+Se incorporó un servicio de buffer de fragmentos:
+
+```text
+app/services/sqs_fragment_store_service.py
+```
+
+Tabla usada:
+
+```text
+sqs_alert_fragments
+```
+
+### Responsabilidad del fragment store
+
+```text
+- guardar logical_event_core
+- guardar logical_event_extra
+- correlacionar ambos por event_uid
+- marcar WAITING_PAIR si falta un fragmento
+- marcar READY si ambos existen
+- construir logical_event_full
+- marcar PROCESSED al completar el flujo
+- marcar ERROR si falla el procesamiento
+```
+
+### Estados manejados
+
+```text
+WAITING_PAIR
+READY
+PROCESSED
+ERROR
+```
+
+### Flujo de ensamblado
+
+```text
+CORE recibido
+    ↓
+guardar core_payload
+    ↓
+status = WAITING_PAIR
+
+EXTRA recibido
+    ↓
+guardar extra_payload
+    ↓
+status = READY
+    ↓
+merge_core_extra_payloads()
+    ↓
+logical_event_full
+    ↓
+process_alert_background()
+```
+
+---
+
+## X.9 Mejora de idempotencia con upsert
+
+### Problema detectado
+
+Durante las pruebas se observó un error de duplicado en Supabase:
+
+```text
+duplicate key value violates unique constraint "sqs_alert_fragments_event_uid_key"
+```
+
+Esto ocurría porque un `event_uid` podía existir ya en la tabla cuando el servicio intentaba hacer un insert nuevo.
+
+### Solución aplicada
+
+Se cambió el insert directo por un upsert usando `event_uid` como clave de conflicto.
+
+Cambio conceptual:
+
+```text
+insert(row)
+```
+
+reemplazado por:
+
+```text
+upsert(row, on_conflict="event_uid")
+```
+
+### Resultado
+
+```text
+- se reducen errores por duplicados
+- se mejora tolerancia a reintentos
+- se soporta mejor concurrencia
+- se evita que un fragmento repetido rompa el pipeline
+```
+
+---
+
+## X.10 process_alert_background reutilizable fuera de FastAPI
+
+### Problema resuelto
+
+La función de procesamiento originalmente estaba asociada al flujo del backend. Para usar Lambda, era necesario que pudiera ejecutarse fuera de FastAPI.
+
+### Solución
+
+Se adaptó `process_alert_background()` para que sea reutilizable desde distintos contextos.
+
+Ubicación:
+
+```text
+app/services/webhook_background_service.py
+```
+
+### Responsabilidades actuales
+
+```text
+- decidir si el payload debe validarse
+- ejecutar run_validation()
+- actualizar LAST_VALIDATION
+- enviar Telegram si approve=true
+- persistir en Supabase
+- exportar a Databricks/S3
+- actualizar LAST_ALERT
+- registrar errores en backend_error_logs
+- devolver estado ok / critical_error
+```
+
+### Contextos desde los que puede ejecutarse
+
+```text
+- FastAPI
+- AWS Lambda
+- script local
+- tests unitarios
+```
+
+### Regla de errores aplicada
+
+```text
+Validación: crítico
+Supabase: crítico
+S3 / Databricks export: crítico
+Telegram: no crítico
+LAST_ALERT update: no crítico
+```
+
+---
+
+## X.11 AWS S3 — Data Lake Bronze
+
+### Problema resuelto
+
+Supabase es útil para operación y dashboard, pero no es el lugar ideal para guardar histórico masivo, raw payloads completos y datasets futuros de ML.
+
+### Solución
+
+Se incorporó AWS S3 como almacenamiento analítico Bronze.
+
+Bucket:
+
+```text
+trading-lakehouse-btc-s3
+```
+
+Prefijo base:
+
+```text
+bronze/trading_alerts
+```
+
+### Responsabilidad de S3
+
+```text
+- almacenar eventos procesados en formato JSONL
+- conservar raw_payload completo
+- conservar raw_validation completo
+- servir como entrada para Databricks
+- mantener histórico escalable
+- separar operación y analítica
+```
+
+### Estructura de particionado
+
+```text
+s3://trading-lakehouse-btc-s3/bronze/trading_alerts/
+    processing_date=YYYY-MM-DD/
+        symbol=btcusdc/
+            tf=1m/
+                message_type=logical_event_full/
+                    event_<event_uid>_<timestamp>.jsonl
+```
+
+### Ejemplo validado
+
+```text
+s3://trading-lakehouse-btc-s3/bronze/trading_alerts/processing_date=2026-05-02/symbol=btcusdc/tf=1m/message_type=logical_event_full/event_test_s3_final_010_20260502T211920389832.jsonl
+```
+
+---
+
+## X.12 Servicio de exportación a Databricks / S3
+
+### Servicio trabajado
+
+```text
+app/services/databricks_export_service.py
+```
+
+### Servicio de almacenamiento S3
+
+```text
+app/services/s3_storage_service.py
+```
+
+### Responsabilidad
+
+```text
+- construir evento Bronze
+- serializar como JSONL
+- construir ruta particionada
+- subir archivo a S3
+- devolver s3_uri
+- registrar logs de éxito o error
+```
+
+### Contrato Bronze exportado
+
+Cada evento exportado contiene:
+
+```text
+event_uid
+schema_version
+message_type
+trace_id
+symbol
+tf
+event
+side
+price
+validation_approve
+validation_confidence
+probability_tp_before_sl
+raw_payload
+raw_validation
+ingestion_ts
+processing_date
+source
+lakehouse_layer
+```
+
+### Resultado validado
+
+Se validó correctamente:
+
+```text
+- generación del JSONL
+- escritura en S3
+- path particionado
+- log s3_upload_ok
+- log databricks_export_s3_success
+```
+
+---
+
+## X.13 Databricks Auto Loader desde S3
+
+### Problema resuelto
+
+Una vez los eventos estaban en S3, era necesario conectarlos con Databricks para construir el Lakehouse.
+
+### Solución
+
+Se usó Databricks Auto Loader para leer desde S3.
+
+### Capa Bronze
+
+Tabla:
+
+```text
+trading.bronze.alerts_raw
+```
+
+Fuente:
+
+```text
+s3://trading-lakehouse-btc-s3/bronze/trading_alerts/
+```
+
+### Funcionalidades de Bronze
+
+```text
+- lectura incremental desde S3
+- uso de schemaLocation
+- checkpoint externo
+- evolución de schema
+- lectura de _metadata.file_path
+- ingestión hacia Delta Lake
+```
+
+### Resultado
+
+Los archivos exportados por Lambda a S3 son ingeridos por Databricks como capa Bronze.
+
+---
+
+## X.14 Capas Bronze, Silver y Gold trabajadas
+
+### Bronze
+
+Responsabilidad:
+
+```text
+- ingesta raw desde S3
+- mínima transformación
+- trazabilidad de archivo origen
+- conservación de raw_payload y raw_validation
+```
+
+Tabla:
+
+```text
+trading.bronze.alerts_raw
+```
+
+### Silver
+
+Responsabilidad:
+
+```text
+- limpiar datos
+- aplanar campos clave
+- normalizar symbol / side
+- extraer validation
+- extraer trade_plan
+- extraer market_snapshot
+- extraer structure_snapshot
+- extraer ml_tracking
+- deduplicar por clave técnica
+```
+
+Tabla:
+
+```text
+trading.silver.alerts_clean
+```
+
+### Gold
+
+Responsabilidad:
+
+```text
+- construir tablas de consumo final
+- preparar señales validadas
+- calcular métricas agregadas
+- preparar candidatos para ML
+```
+
+Tablas:
+
+```text
+trading.gold.validated_trade_signals
+trading.gold.signal_quality_metrics
+trading.gold.ml_training_candidates
+```
+
+---
+
+## X.15 AWS IAM — Permisos trabajados
+
+### Problema resuelto
+
+Lambda necesitaba permisos para escribir en S3, consumir SQS y escribir logs en CloudWatch.
+
+### Rol Lambda
+
+Rol usado:
+
+```text
+trading-alerts-lambda-role
+```
+
+### Permisos utilizados durante pruebas
+
+```text
+AWSLambdaBasicExecutionRole
+AmazonSQSFullAccess
+AmazonS3FullAccess
+```
+
+### Responsabilidades cubiertas
+
+```text
+AWSLambdaBasicExecutionRole:
+- escribir logs en CloudWatch
+
+AmazonSQSFullAccess:
+- leer mensajes de SQS
+- manejar reintentos
+- consumir cola principal
+
+AmazonS3FullAccess:
+- escribir JSONL en el bucket Bronze
+```
+
+### Recomendación futura
+
+Para producción, reemplazar políticas full access por políticas mínimas específicas:
+
+```text
+sqs:ReceiveMessage
+sqs:DeleteMessage
+sqs:GetQueueAttributes
+sqs:ChangeMessageVisibility
+s3:PutObject
+s3:GetObject
+s3:ListBucket
+logs:CreateLogGroup
+logs:CreateLogStream
+logs:PutLogEvents
+```
+
+---
+
+## X.16 Variables de entorno AWS incorporadas
+
+Variables relevantes para el nuevo flujo:
+
+```env
+AWS_REGION=eu-west-1
+
+SQS_QUEUE_URL=https://sqs.eu-west-1.amazonaws.com/<account-id>/trading-alerts-queue
+SQS_DLQ_URL=https://sqs.eu-west-1.amazonaws.com/<account-id>/trading-alerts-dlq
+
+ENABLE_DATABRICKS_EXPORT=true
+DATABRICKS_EXPORT_TARGET=s3
+
+S3_BUCKET_NAME=trading-lakehouse-btc-s3
+S3_BASE_PREFIX=bronze/trading_alerts
+```
+
+Variables complementarias usadas por el consumidor:
+
+```env
+WEBHOOK_SECRET=MI_SECRET
+
+SUPABASE_URL=https://<project-id>.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
+
+TELEGRAM_ENABLED=false
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+
+VALIDATION_THRESHOLD=0.62
+MIN_SCORE_THRESHOLD=55
+REQUEST_TIMEOUT_SEC=8.0
+```
+
+---
+
+## X.17 Problemas detectados durante la implementación y correcciones
+
+### 1. Paquete ZIP demasiado grande
+
+Problema:
+
+```text
+El ZIP de Lambda superaba el tamaño permitido.
+```
+
+Solución:
+
+```text
+Migración a Lambda Container Image usando Docker + ECR.
+```
+
+---
+
+### 2. Dependencias incompatibles generadas desde Windows
+
+Problema:
+
+```text
+numpy/scipy podían empaquetarse con binarios no compatibles con Lambda Linux.
+```
+
+Solución:
+
+```text
+Construcción dentro de contenedor compatible con AWS Lambda.
+```
+
+---
+
+### 3. Falta de dependencias en Lambda
+
+Problema:
+
+```text
+No module named 'fastapi'
+No module named 'scipy'
+```
+
+Solución:
+
+```text
+Revisión del empaquetado y uso de imagen containerizada con requirements completos.
+```
+
+---
+
+### 4. Duplicate key en sqs_alert_fragments
+
+Problema:
+
+```text
+duplicate key value violates unique constraint "sqs_alert_fragments_event_uid_key"
+```
+
+Solución:
+
+```text
+Cambio de insert a upsert con on_conflict="event_uid".
+```
+
+---
+
+### 5. S3_BUCKET_NAME no configurado
+
+Problema:
+
+```text
+S3_BUCKET_NAME is not configured
+```
+
+Solución:
+
+```text
+Agregar S3_BUCKET_NAME en variables de entorno de Lambda.
+```
+
+---
+
+### 6. Supabase trigger con updated_at
+
+Problema observado:
+
+```text
+record "new" has no field "updated_at"
+```
+
+Causa probable:
+
+```text
+Existía un trigger o función de update esperando una columna updated_at en una tabla que no la tenía.
+```
+
+Solución aplicada en la validación final:
+
+```text
+Se corrigió el estado de Supabase y las pruebas posteriores persistieron correctamente.
+```
+
+---
+
+## X.18 Estado validado al final de esta fase
+
+Al cierre de esta fase se validó correctamente:
+
+```text
+- Lambda recibe mensajes desde SQS
+- CORE queda en WAITING_PAIR
+- EXTRA completa el par
+- se genera logical_event_full
+- se ejecuta validación
+- se consulta Binance
+- se calculan validation_steps
+- se persiste en Supabase
+- se escribe JSONL en S3
+- se genera s3_uri correcto
+- Databricks lee Bronze desde S3
+- Silver transforma correctamente
+- Gold genera tablas analíticas
+```
+
+---
+
+## X.19 Arquitectura actualizada con AWS
+
+```text
+┌──────────────────────────────┐
+│ TradingView / Pine Script    │
+│ JSON schema_version 2.0      │
+│ CORE / EXTRA / EXECUTED      │
+└──────────────┬───────────────┘
+               │
+               ▼
+┌──────────────────────────────┐
+│ FastAPI / Vercel             │
+│ /api/webhook                 │
+│ - valida secret              │
+│ - parsea payload             │
+│ - normaliza                  │
+│ - encola rápido              │
+└──────────────┬───────────────┘
+               │
+               ▼
+┌──────────────────────────────┐
+│ AWS SQS                      │
+│ trading-alerts-queue         │
+│ + DLQ                        │
+└──────────────┬───────────────┘
+               │
+               ▼
+┌──────────────────────────────┐
+│ AWS Lambda Consumer          │
+│ - consume SQS                │
+│ - une CORE + EXTRA           │
+│ - ejecuta validación         │
+│ - persiste resultados        │
+└───────┬──────────────┬───────┘
+        │              │
+        ▼              ▼
+┌──────────────┐   ┌─────────────────────┐
+│ Supabase     │   │ AWS S3 Bronze        │
+│ Operacional  │   │ JSONL particionado   │
+└──────┬───────┘   └──────────┬──────────┘
+       │                      │
+       ▼                      ▼
+┌──────────────┐   ┌─────────────────────┐
+│ Dashboard    │   │ Databricks           │
+│ Streamlit    │   │ Bronze/Silver/Gold   │
+└──────────────┘   └──────────┬──────────┘
+                              │
+                              ▼
+                    ┌─────────────────────┐
+                    │ Analytics / ML       │
+                    │ Backtesting          │
+                    └─────────────────────┘
+```
+
+---
+
+## X.20 Resumen ejecutivo
+
+En esta fase se incorporó una arquitectura AWS desacoplada para soportar mejor la recepción y procesamiento de señales de trading.
+
+La mejora principal fue separar el webhook del procesamiento pesado:
+
+```text
+Antes:
+TradingView → Webhook → Validación pesada → Persistencia → Export
+
+Ahora:
+TradingView → Webhook rápido → SQS → Lambda → Validación → Supabase + S3 → Databricks
+```
+
+Los servicios AWS añadidos permiten:
+
+```text
+- desacoplar ingesta y procesamiento
+- evitar timeouts
+- manejar reintentos
+- conservar mensajes fallidos en DLQ
+- procesar señales en Lambda
+- escribir histórico analítico en S3
+- alimentar Databricks para Lakehouse
+```
+
+El sistema queda preparado para evolucionar hacia una arquitectura de microservicios más clara, donde cada responsabilidad pueda separarse progresivamente:
+
+```text
+Webhook Service
+Queue Service
+Assembler Service
+Validation Service
+Persistence Service
+Lakehouse Export Service
+Notification Service
+```
+
+Estado final de esta fase:
+
+```text
+VALIDADO:
+- SQS operativo
+- Lambda consumer operativo
+- fragment store operativo
+- ensamblado CORE + EXTRA operativo
+- validación ejecutándose desde Lambda
+- Supabase operativo
+- S3 Bronze operativo
+- Databricks Bronze/Silver/Gold operativo
+
+PENDIENTE / FUTURO:
+- endurecer IAM con permisos mínimos
+- separar Lambda assembler y Lambda validator si crece el volumen
+- añadir monitoreo CloudWatch más formal
+- definir alarmas sobre DLQ
+- automatizar jobs Databricks
+- construir labeling real de outcomes TP/SL
+- entrenar modelos ML sobre Gold
+```

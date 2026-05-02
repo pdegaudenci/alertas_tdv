@@ -157,7 +157,10 @@ async def upsert_fragment_payload(
             resp = (
                 supabase
                 .table(TABLE_NAME)
-                .insert(sanitize_for_json(row))
+                .upsert(
+                    sanitize_for_json(row),
+                    on_conflict="event_uid",
+                )
                 .execute()
             )
 
