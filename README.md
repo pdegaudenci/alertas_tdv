@@ -57,7 +57,7 @@ Este backend **no reemplaza** la lógica de Pine Script. Actúa como una capa po
 ```
 
 ---
-
+![Workflow de ejecución del backend al recibir alerta](https://raw.githubusercontent.com/pdegaudenci/alertas_tdv/master/backend/docs/image.png)
 ## 2. Responsabilidades del sistema
 
 El sistema queda dividido en las siguientes responsabilidades:
@@ -2254,6 +2254,7 @@ Nivel 1: Validación del payload y evento
 Nivel 2: Validación técnica con datos de Pine Script
 Nivel 3: Validación externa con mercado real, score y probabilidad TP/SL
 ```
+
 
 La arquitectura de datos queda separada así:
 
