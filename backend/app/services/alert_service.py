@@ -157,6 +157,18 @@ def infer_side_from_signal(signal: Dict[str, Any], payload: Dict[str, Any], even
         return "SHORT"
 
     return None
+def calculate_rr_ratio(rr_ratio: Any, tp_perc: Any, sl_perc: Any) -> Any:
+    rr_existing = safe_float(rr_ratio)
+    tp_pct = safe_float(tp_perc)
+    sl_pct = safe_float(sl_perc)
+
+    if rr_existing is not None and rr_existing > 0:
+        return rr_existing
+
+    if tp_pct is not None and sl_pct is not None and sl_pct > 0:
+        return tp_pct / sl_pct
+
+    return rr_existing
 
 def calculate_tp_sl_from_percent(
     side: Any,
@@ -320,7 +332,11 @@ def ensure_canonical_schema(payload: Dict[str, Any]) -> Dict[str, Any]:
         "sl_price": canonical_sl_price,
         "tp_perc": tp_perc_raw,
         "sl_perc": sl_perc_raw,
-        "rr_ratio": first_non_empty(existing_trade_plan.get("rr_ratio"), execution.get("rr_ratio")),
+        "rr_ratio": calculate_rr_ratio(
+            first_non_empty(existing_trade_plan.get("rr_ratio"), execution.get("rr_ratio")),
+            tp_perc_raw,
+            sl_perc_raw,
+        ),
         "distance_to_tp_pct": first_non_empty(
             existing_trade_plan.get("distance_to_tp_pct"),
             execution.get("distance_to_tp_pct"),
