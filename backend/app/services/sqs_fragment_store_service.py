@@ -182,11 +182,28 @@ async def upsert_fragment_payload(
             )
             updated = await get_fragment_row(event_uid, trace_id=trace_id)
 
+        core_debug = updated.get("core_payload") if isinstance(updated, dict) else None
+        extra_debug = updated.get("extra_payload") if isinstance(updated, dict) else None
+
+        core_signal = core_debug.get("signal", {}) if isinstance(core_debug, dict) and isinstance(core_debug.get("signal"), dict) else {}
+        core_trade_plan = core_debug.get("trade_plan", {}) if isinstance(core_debug, dict) and isinstance(core_debug.get("trade_plan"), dict) else {}
+
+        extra_signal = extra_debug.get("signal", {}) if isinstance(extra_debug, dict) and isinstance(extra_debug.get("signal"), dict) else {}
+
         log_trace(trace_id, "sqs_fragment_upsert_ok", {
             "event_uid": event_uid,
             "message_type": message_type,
             "complete": complete,
             "status": updated.get("status") if updated else None,
+            "core_message_type": core_debug.get("message_type") if isinstance(core_debug, dict) else None,
+            "core_event": core_signal.get("event"),
+            "core_side": core_signal.get("side"),
+            "core_price": core_signal.get("price"),
+            "core_entry_price": core_signal.get("entry_price"),
+            "core_tp_price": core_trade_plan.get("tp_price"),
+            "core_sl_price": core_trade_plan.get("sl_price"),
+            "extra_message_type": extra_debug.get("message_type") if isinstance(extra_debug, dict) else None,
+            "extra_has_signal": bool(extra_signal),
         })
 
         return {

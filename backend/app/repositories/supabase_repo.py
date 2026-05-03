@@ -32,7 +32,7 @@ from app.core.logging import log_event, log_trace
 from app.utils.time_utils import utc_now_iso
 from app.utils.json_utils import sanitize_for_json
 from app.utils.math_utils import safe_float, nested_get
-from app.services.alert_service import normalize_alert
+from app.services.alert_service import normalize_alert, ensure_canonical_schema
 
 
 supabase: Optional[Client] = None
@@ -70,7 +70,7 @@ def should_persist_payload(payload: Dict[str, Any]) -> bool:
     - Supabase guarda eventos relevantes para operar.
     - Databricks guarda todos los payloads completos por separado.
     """
-
+    payload = ensure_canonical_schema(payload)
     source = payload.get("source", {}) if isinstance(payload.get("source"), dict) else {}
     script = str(source.get("script") or payload.get("strategy_name") or "").strip()
 
@@ -170,6 +170,7 @@ def should_persist_payload(payload: Dict[str, Any]) -> bool:
     return False
 
 def extract_setup_id(payload: Dict[str, Any]) -> str:
+    payload = ensure_canonical_schema(payload)
     signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
 
     message_type = str(payload.get("message_type") or "").lower()
@@ -198,6 +199,7 @@ def extract_setup_id(payload: Dict[str, Any]) -> str:
 
 
 def extract_event_id(payload: Dict[str, Any]) -> str:
+    payload = ensure_canonical_schema(payload)
     signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
 
     candidates = [
@@ -216,13 +218,15 @@ def extract_event_id(payload: Dict[str, Any]) -> str:
 
 def build_normalized_payload_for_db(payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
-        normalized = normalize_alert(payload)
+        canonical_payload = ensure_canonical_schema(payload)
+        normalized = normalize_alert(canonical_payload)
         return sanitize_for_json(normalized)
     except Exception:
-        return sanitize_for_json(payload)
+        return sanitize_for_json(ensure_canonical_schema(payload))
 
 
 def build_lifecycle_state(payload: Dict[str, Any], validation_result: Optional[Dict[str, Any]] = None) -> str:
+    payload = ensure_canonical_schema(payload)
     signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
     event = str(signal.get("event") or payload.get("event") or "").upper().strip()
 
@@ -263,6 +267,7 @@ def build_lifecycle_state(payload: Dict[str, Any], validation_result: Optional[D
 
 
 def build_technical_state_for_db(payload: Dict[str, Any], validation_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = ensure_canonical_schema(payload)
     signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
     context = payload.get("context", {}) if isinstance(payload.get("context"), dict) else {}
     movement = payload.get("movement", {}) if isinstance(payload.get("movement"), dict) else {}
@@ -345,9 +350,10 @@ async def supabase_insert_alert_event(
     payload: Dict[str, Any],
     validation_result: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
+    
     if not SUPABASE_RUNTIME_ENABLED or supabase is None:
         return None
-
+    payload = ensure_canonical_schema(payload)
     signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
     source_obj = payload.get("source", {}) if isinstance(payload.get("source"), dict) else {}
     quality = payload.get("quality", {}) if isinstance(payload.get("quality"), dict) else {}
@@ -469,7 +475,7 @@ async def supabase_upsert_trade_setup(
 ) -> None:
     if not SUPABASE_RUNTIME_ENABLED or supabase is None:
         return
-
+    payload = ensure_canonical_schema(payload)
     signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
     setup_id = extract_setup_id(payload)
 
@@ -521,7 +527,18 @@ async def supabase_insert_validation_result(
 ) -> None:
     if not SUPABASE_RUNTIME_ENABLED or supabase is None:
         return
+async def supabase_insert_validation_result(
+    payload: Dict[str, Any],
+    validation_result: Optional[Dict[str, Any]] = None,
+    alert_event_db_id: Optional[str] = None,
+) -> None:
+    if not SUPABASE_RUNTIME_ENABLED or supabase is None:
+        return
 
+    payload = ensure_canonical_schema(payload)
+
+    if not isinstance(validation_result, dict):
+        return
     if not isinstance(validation_result, dict):
         return
 
@@ -563,6 +580,7 @@ async def supabase_insert_validation_result(
         })
 
 
+
 async def persist_to_supabase(
     payload: Dict[str, Any],
     validation_result: Optional[Dict[str, Any]] = None,
@@ -574,6 +592,8 @@ async def persist_to_supabase(
             "client_available": supabase is not None,
         })
         return
+
+    payload = ensure_canonical_schema(payload)
 
     try:
         if not should_persist_payload(payload):

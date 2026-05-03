@@ -47,22 +47,175 @@ def first_non_empty(*values: Any) -> Any:
             return value
     return None
 
+def unwrap_payload_container(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Algunos flujos pueden envolver el payload real dentro de:
+      {"payload": {...}}
+    Esta función desempaqueta ese caso conservando metadata útil del wrapper.
+
+    Importante:
+    - Si el payload ya tiene signal/trade_plan/context, no se toca.
+    - Si no tiene signal y sí tiene payload dict, se promueve payload.
+    """
+    if not isinstance(payload, dict):
+        return {}
+
+    nested = payload.get("payload")
+
+    if isinstance(nested, dict) and "signal" not in payload:
+        out = dict(nested)
+
+        for key in [
+            "event_uid",
+            "schema_version",
+            "trace_id",
+            "secret",
+            "source",
+            "assembled_from",
+            "extra_received",
+        ]:
+            if key in payload and key not in out:
+                out[key] = payload.get(key)
+
+        if payload.get("message_type") == "logical_event_full":
+            out["message_type"] = "logical_event_full"
+
+        return out
+
+    return payload
+
+
+def deep_merge_without_nulls(base: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Merge recursivo donde patch solo sobrescribe si trae valor no nulo/no vacío.
+    Evita que logical_event_extra borre campos buenos del CORE con null.
+    """
+    result = dict(base or {})
+
+    for key, value in (patch or {}).items():
+        if value is None or value == "":
+            continue
+
+        if (
+            isinstance(value, dict)
+            and isinstance(result.get(key), dict)
+        ):
+            result[key] = deep_merge_without_nulls(result[key], value)
+        else:
+            result[key] = value
+
+    return result
+
+
+def infer_event_from_signal(signal: Dict[str, Any], payload: Dict[str, Any]) -> str | None:
+    event = first_non_empty(
+        signal.get("event"),
+        payload.get("event"),
+        signal.get("setup_state"),
+        payload.get("setup_state"),
+        signal.get("setup"),
+        payload.get("setup"),
+    )
+
+    if event is None:
+        return None
+
+    event_txt = str(event).upper().strip()
+
+    if event_txt in {"INIT_LONG", "LONGINIT"}:
+        return "LONG_INIT"
+
+    if event_txt in {"INIT_SHORT", "SHORTINIT"}:
+        return "SHORT_INIT"
+
+    return event_txt
+
+
+def infer_side_from_signal(signal: Dict[str, Any], payload: Dict[str, Any], event: Any = None) -> str | None:
+    side = first_non_empty(
+        signal.get("side"),
+        payload.get("side"),
+        signal.get("setup_side"),
+        payload.get("setup_side"),
+    )
+
+    if side is not None:
+        side_txt = str(side).upper().strip()
+
+        if side_txt in {"LONG", "BUY", "BULL", "BULLISH"}:
+            return "LONG"
+
+        if side_txt in {"SHORT", "SELL", "BEAR", "BEARISH"}:
+            return "SHORT"
+
+    event_txt = str(event or "").upper().strip()
+
+    if "LONG" in event_txt or "IMP_UP" in event_txt:
+        return "LONG"
+
+    if "SHORT" in event_txt or "IMP_DN" in event_txt:
+        return "SHORT"
+
+    return None
+
+
+def calculate_tp_sl_from_percent(
+    side: Any,
+    entry_price: Any,
+    tp_price: Any,
+    sl_price: Any,
+    tp_perc: Any,
+    sl_perc: Any,
+) -> tuple[Any, Any]:
+    """
+    Calcula TP/SL si vienen null pero existen entry_price + tp_perc/sl_perc.
+    """
+    entry = safe_float(entry_price)
+    tp_existing = safe_float(tp_price)
+    sl_existing = safe_float(sl_price)
+    tp_pct = safe_float(tp_perc)
+    sl_pct = safe_float(sl_perc)
+
+    if entry is None or entry <= 0:
+        return tp_existing, sl_existing
+
+    side_txt = str(side or "").upper().strip()
+
+    if tp_existing is None and tp_pct is not None:
+        if side_txt == "LONG":
+            tp_existing = entry * (1.0 + tp_pct / 100.0)
+        elif side_txt == "SHORT":
+            tp_existing = entry * (1.0 - tp_pct / 100.0)
+
+    if sl_existing is None and sl_pct is not None:
+        if side_txt == "LONG":
+            sl_existing = entry * (1.0 - sl_pct / 100.0)
+        elif side_txt == "SHORT":
+            sl_existing = entry * (1.0 + sl_pct / 100.0)
+
+    return tp_existing, sl_existing
 
 def ensure_canonical_schema(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
 
+    payload = unwrap_payload_container(payload)
     out = dict(payload)
 
     signal = out.get("signal", {}) if isinstance(out.get("signal"), dict) else {}
     execution = out.get("execution", {}) if isinstance(out.get("execution"), dict) else {}
     context = out.get("context", {}) if isinstance(out.get("context"), dict) else {}
+    existing_trade_plan = out.get("trade_plan", {}) if isinstance(out.get("trade_plan"), dict) else {}
+
+    inferred_event = infer_event_from_signal(signal, out)
+    inferred_side = infer_side_from_signal(signal, out, inferred_event)
 
     canonical_price = first_non_empty(
         signal.get("market_price"),
         signal.get("entry_price"),
         signal.get("price"),
         signal.get("close"),
+        existing_trade_plan.get("entry_price"),
         execution.get("entry_price"),
         execution.get("market_price"),
         out.get("price"),
@@ -76,6 +229,7 @@ def ensure_canonical_schema(payload: Dict[str, Any]) -> Dict[str, Any]:
         signal.get("market_price"),
         signal.get("price"),
         signal.get("close"),
+        existing_trade_plan.get("entry_price"),
         execution.get("entry_price"),
         execution.get("market_price"),
         out.get("entry_price"),
@@ -84,15 +238,52 @@ def ensure_canonical_schema(payload: Dict[str, Any]) -> Dict[str, Any]:
         out.get("close"),
     )
 
+    tp_price_raw = first_non_empty(
+        existing_trade_plan.get("tp_price"),
+        existing_trade_plan.get("tp"),
+        execution.get("tp_price"),
+        execution.get("tp"),
+        out.get("tp_price"),
+        out.get("tp"),
+    )
+
+    sl_price_raw = first_non_empty(
+        existing_trade_plan.get("sl_price"),
+        existing_trade_plan.get("sl"),
+        execution.get("sl_price"),
+        execution.get("sl"),
+        out.get("sl_price"),
+        out.get("sl"),
+    )
+
+    tp_perc_raw = first_non_empty(
+        existing_trade_plan.get("tp_perc"),
+        out.get("tp_perc"),
+    )
+
+    sl_perc_raw = first_non_empty(
+        existing_trade_plan.get("sl_perc"),
+        out.get("sl_perc"),
+    )
+
+    canonical_tp_price, canonical_sl_price = calculate_tp_sl_from_percent(
+        side=inferred_side,
+        entry_price=canonical_entry_price,
+        tp_price=tp_price_raw,
+        sl_price=sl_price_raw,
+        tp_perc=tp_perc_raw,
+        sl_perc=sl_perc_raw,
+    )
+
     out["signal"] = {
         **signal,
         "symbol": first_non_empty(signal.get("symbol"), out.get("symbol"), out.get("ticker"), "BTCUSDC"),
         "tf": first_non_empty(signal.get("tf"), out.get("tf"), out.get("timeframe"), "1m"),
-        "event": first_non_empty(signal.get("event"), out.get("event")),
-        "side": first_non_empty(signal.get("side"), out.get("side")),
+        "event": inferred_event,
+        "side": inferred_side,
         "price": canonical_price,
         "entry_price": canonical_entry_price,
-        "setup": first_non_empty(signal.get("setup"), signal.get("setup_state"), out.get("setup")),
+        "setup": first_non_empty(signal.get("setup"), signal.get("setup_state"), out.get("setup"), inferred_event),
     }
 
     out["context"] = {
@@ -104,12 +295,13 @@ def ensure_canonical_schema(payload: Dict[str, Any]) -> Dict[str, Any]:
         "liq_state": context.get("liq_state"),
     }
 
-    existing_trade_plan = out.get("trade_plan", {}) if isinstance(out.get("trade_plan"), dict) else {}
-
     out["trade_plan"] = {
         **existing_trade_plan,
-        "tp_price": first_non_empty(existing_trade_plan.get("tp_price"), execution.get("tp_price")),
-        "sl_price": first_non_empty(existing_trade_plan.get("sl_price"), execution.get("sl_price")),
+        "entry_price": first_non_empty(existing_trade_plan.get("entry_price"), canonical_entry_price),
+        "tp_price": canonical_tp_price,
+        "sl_price": canonical_sl_price,
+        "tp_perc": tp_perc_raw,
+        "sl_perc": sl_perc_raw,
         "rr_ratio": first_non_empty(existing_trade_plan.get("rr_ratio"), execution.get("rr_ratio")),
         "distance_to_tp_pct": first_non_empty(
             existing_trade_plan.get("distance_to_tp_pct"),
@@ -121,23 +313,29 @@ def ensure_canonical_schema(payload: Dict[str, Any]) -> Dict[str, Any]:
         ),
     }
 
+    out["symbol"] = out["signal"].get("symbol")
+    out["tf"] = out["signal"].get("tf")
+    out["event"] = out["signal"].get("event")
+    out["side"] = out["signal"].get("side")
+    out["price"] = out["signal"].get("price")
+
     return out
 
 def assemble_event_payload(payload_raw: Dict[str, Any]) -> Dict[str, Any]:
     return ensure_canonical_schema(payload_raw)
 
-
 def should_validate_payload(payload: Dict[str, Any]) -> bool:
-    signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
+    canonical = ensure_canonical_schema(payload)
+    signal = canonical.get("signal", {}) if isinstance(canonical.get("signal"), dict) else {}
 
     event = str(
         signal.get("event")
-        or payload.get("event")
+        or canonical.get("event")
         or ""
     ).upper().strip()
 
     message_type = str(
-        payload.get("message_type")
+        canonical.get("message_type")
         or ""
     ).lower().strip()
 
@@ -159,6 +357,7 @@ def should_validate_payload(payload: Dict[str, Any]) -> bool:
     }
 
     return message_type in valid_message_types and event in valid_events
+
 
 def build_log(route: str, payload: dict, headers: dict | None = None) -> dict:
     canonical = ensure_canonical_schema(payload)
@@ -204,28 +403,46 @@ def normalize_alert(payload: Dict[str, Any]) -> Dict[str, Any]:
     htf_context = canonical.get("htf_context", {}) if isinstance(canonical.get("htf_context"), dict) else {}
     execution = canonical.get("execution", {}) if isinstance(canonical.get("execution"), dict) else {}
     ml_tracking = canonical.get("ml_tracking", {}) if isinstance(canonical.get("ml_tracking"), dict) else {}
-    side = str(signal.get("side") or canonical.get("side") or "").lower().strip()
+    side_raw = str(signal.get("side") or canonical.get("side") or "").upper().strip()
     symbol = str(signal.get("symbol") or canonical.get("symbol") or canonical.get("ticker") or "BTCUSDC").upper().strip()
     event = str(signal.get("event") or canonical.get("event") or "").upper().strip()
     tf = str(signal.get("tf") or canonical.get("tf") or canonical.get("timeframe") or "1m").strip()
+
+    if side_raw in {"LONG", "BUY", "BULL", "BULLISH"}:
+        side = "long"
+    elif side_raw in {"SHORT", "SELL", "BEAR", "BEARISH"}:
+        side = "short"
+    elif "LONG" in event or "IMP_UP" in event:
+        side = "long"
+    elif "SHORT" in event or "IMP_DN" in event:
+        side = "short"
+    else:
+        side = ""
 
     entry_price = safe_float(
         signal.get("entry_price")
         or signal.get("price")
         or signal.get("close")
+        or trade_plan.get("entry_price")
         or canonical.get("price")
+        or canonical.get("close")
     )
 
     execution = canonical.get("execution", {}) if isinstance(canonical.get("execution"), dict) else {}
 
-    tp_price = safe_float(trade_plan.get("tp_price") or execution.get("tp_price"))
-    sl_price = safe_float(trade_plan.get("sl_price") or execution.get("sl_price"))
+    tp_price = safe_float(trade_plan.get("tp_price") or trade_plan.get("tp") or execution.get("tp_price"))
+    sl_price = safe_float(trade_plan.get("sl_price") or trade_plan.get("sl") or execution.get("sl_price"))
 
-    if side not in {"long", "short"}:
-        if "LONG" in event or "IMP_UP" in event:
-            side = "long"
-        elif "SHORT" in event or "IMP_DN" in event:
-            side = "short"
+    if tp_price is None or sl_price is None:
+        side_for_calc = "LONG" if side == "long" else "SHORT" if side == "short" else None
+        tp_price, sl_price = calculate_tp_sl_from_percent(
+            side=side_for_calc,
+            entry_price=entry_price,
+            tp_price=tp_price,
+            sl_price=sl_price,
+            tp_perc=trade_plan.get("tp_perc"),
+            sl_perc=trade_plan.get("sl_perc"),
+        )
 
     return {
         "schema_version": canonical.get("schema_version", "unknown"),
@@ -372,10 +589,21 @@ def build_history_item(payload: dict, validation_result: dict | None = None) -> 
         "penalties": validation.get("penalties", []),
     })
 
-
 def merge_core_extra_payloads(core: Dict[str, Any], extra: Dict[str, Any]) -> Dict[str, Any]:
-    merged = dict(core)
+    """
+    Fusiona logical_event_core + logical_event_extra.
 
+    Regla:
+    - CORE es la base principal.
+    - EXTRA solo agrega bloques complementarios.
+    - EXTRA nunca debe borrar signal/trade_plan/context/quality/trigger del CORE.
+    """
+    core_clean = unwrap_payload_container(core)
+    extra_clean = unwrap_payload_container(extra)
+
+    merged = dict(core_clean)
+
+    # Bloques que normalmente vienen del EXTRA
     for key in [
         "adaptive_algoalpha",
         "movement",
@@ -387,15 +615,30 @@ def merge_core_extra_payloads(core: Dict[str, Any], extra: Dict[str, Any]) -> Di
         "sequence",
         "htf_context",
     ]:
-        if isinstance(extra.get(key), dict):
-            merged[key] = extra[key]
+        if isinstance(extra_clean.get(key), dict):
+            existing = merged.get(key, {}) if isinstance(merged.get(key), dict) else {}
+            merged[key] = deep_merge_without_nulls(existing, extra_clean[key])
 
+    # Si el EXTRA trae algún bloque adicional útil, se conserva sin pisar con nulls
+    for key in [
+        "ml_tracking",
+        "execution",
+    ]:
+        if isinstance(extra_clean.get(key), dict):
+            existing = merged.get(key, {}) if isinstance(merged.get(key), dict) else {}
+            merged[key] = deep_merge_without_nulls(existing, extra_clean[key])
+
+    # Seguridad: mantener siempre metadata principal del CORE
+    merged["event_uid"] = first_non_empty(core_clean.get("event_uid"), extra_clean.get("event_uid"))
+    merged["schema_version"] = first_non_empty(core_clean.get("schema_version"), extra_clean.get("schema_version"), "2.0")
     merged["message_type"] = "logical_event_full"
     merged["assembled_from"] = ["logical_event_core", "logical_event_extra"]
     merged["extra_received"] = True
 
-    return ensure_canonical_schema(merged)
+    if "source" not in merged and isinstance(core_clean.get("source"), dict):
+        merged["source"] = core_clean["source"]
 
+    return ensure_canonical_schema(merged)
 
 def assemble_core_extra_by_event_uid(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
     """

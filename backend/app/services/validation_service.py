@@ -166,8 +166,9 @@ def build_analysis_outputs(
 # ============================================================
 
 async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
-    signal = payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {}
-    event = str(signal.get("event") or payload.get("event") or "").upper()
+    normalized = normalize_alert(payload)
+
+    event = str(normalized.get("event") or "").upper().strip()
 
     if event not in FULL_VALIDATION_EVENTS:
         result = {
@@ -204,10 +205,23 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
                     "final_conclusion": f"Validación omitida para evento {event}.",
                     "score_comment": "No se calculó score externo."
                 }
+            },
+            "normalized_alert": {
+                "schema_version": normalized.get("schema_version"),
+                "message_type": normalized.get("message_type"),
+                "symbol": normalized.get("symbol"),
+                "side": normalized.get("side"),
+                "event": normalized.get("event"),
+                "tf": normalized.get("tf"),
+                "entry_price": normalized.get("entry_price"),
+                "tp_price_alert": normalized.get("tp_price"),
+                "sl_price_alert": normalized.get("sl_price"),
+                "quality_score_alert": normalized.get("quality_score_alert"),
+                "quality_class_alert": normalized.get("quality_class_alert"),
             }
         }
+
         return sanitize_for_json(result)
-    normalized = normalize_alert(payload)
 
     if normalized["side"] not in {"long", "short"}:
         raise HTTPException(status_code=400, detail="Payload missing valid side (long/short)")

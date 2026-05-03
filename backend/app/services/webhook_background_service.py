@@ -34,7 +34,7 @@ from app.utils.time_utils import utc_now_iso
 from app.utils.json_utils import sanitize_for_json
 from app.utils.math_utils import nested_get
 
-from app.services.alert_service import should_validate_payload
+from app.services.alert_service import should_validate_payload, ensure_canonical_schema
 from app.services.validation_service import run_validation
 from app.services.telegram_service import (
     send_telegram_message,
@@ -47,7 +47,34 @@ from app.repositories.supabase_repo import persist_to_supabase
 
 async def process_alert_background(payload: Dict[str, Any], trace_id: str) -> Dict[str, Any]:
     validation_result = None
+    # ============================================================
+    # 0. CANONICAL PAYLOAD
+    # ============================================================
+    # Regla:
+    # - A partir de aquí se usa canonical_payload para validación,
+    #   Supabase, S3/Databricks y logs.
+    # - Evita que wrappers tipo {"payload": {...}} o campos faltantes
+    #   propaguen event/side/price/tp/sl como null.
+    # ============================================================
 
+    original_payload = payload
+    canonical_payload = ensure_canonical_schema(payload)
+
+    log_trace(trace_id, "bg_payload_canonicalized", {
+        "original_message_type": original_payload.get("message_type") if isinstance(original_payload, dict) else None,
+        "canonical_message_type": canonical_payload.get("message_type"),
+        "event_uid": canonical_payload.get("event_uid"),
+        "event": nested_get(canonical_payload, "signal", "event"),
+        "side": nested_get(canonical_payload, "signal", "side"),
+        "symbol": nested_get(canonical_payload, "signal", "symbol"),
+        "tf": nested_get(canonical_payload, "signal", "tf"),
+        "price": nested_get(canonical_payload, "signal", "price"),
+        "entry_price": nested_get(canonical_payload, "signal", "entry_price"),
+        "tp_price": nested_get(canonical_payload, "trade_plan", "tp_price"),
+        "sl_price": nested_get(canonical_payload, "trade_plan", "sl_price"),
+    })
+
+    payload = canonical_payload
     # ============================================================
     # 1. VALIDATION
     # ============================================================

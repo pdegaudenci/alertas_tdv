@@ -23,7 +23,7 @@ from app.core.config import (
     S3_BASE_PREFIX,
 )
 from app.services.s3_storage_service import upload_text_to_s3
-
+from app.services.alert_service import ensure_canonical_schema
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -49,29 +49,35 @@ def _safe_partition_value(value: Any, default: str = "unknown") -> str:
 
 
 def _extract_signal(payload: Dict[str, Any]) -> Dict[str, Any]:
-    signal = payload.get("signal")
+    canonical = ensure_canonical_schema(payload)
+    signal = canonical.get("signal")
     return signal if isinstance(signal, dict) else {}
 
+def _extract_trade_plan(payload: Dict[str, Any]) -> Dict[str, Any]:
+    canonical = ensure_canonical_schema(payload)
+    trade_plan = canonical.get("trade_plan")
+    return trade_plan if isinstance(trade_plan, dict) else {}
 
 def _extract_partition_values(payload: Dict[str, Any]) -> dict:
     now = _utc_now()
-    signal = _extract_signal(payload)
+    canonical_payload = ensure_canonical_schema(payload)
+    signal = _extract_signal(canonical_payload)
 
     symbol = (
         signal.get("symbol")
-        or payload.get("symbol")
-        or payload.get("ticker")
+        or canonical_payload.get("symbol")
+        or canonical_payload.get("ticker")
         or "unknown"
     )
 
     timeframe = (
         signal.get("tf")
-        or payload.get("tf")
-        or payload.get("timeframe")
+        or canonical_payload.get("tf")
+        or canonical_payload.get("timeframe")
         or "unknown"
     )
 
-    message_type = payload.get("message_type") or "unknown"
+    message_type = canonical_payload.get("message_type") or "unknown"
 
     return {
         "processing_date": now.strftime("%Y-%m-%d"),
@@ -79,7 +85,6 @@ def _extract_partition_values(payload: Dict[str, Any]) -> dict:
         "tf": _safe_partition_value(timeframe),
         "message_type": _safe_partition_value(message_type),
     }
-
 
 def _build_relative_object_path(payload: Dict[str, Any]) -> str:
     now = _utc_now()
@@ -118,7 +123,10 @@ def build_databricks_bronze_event(
     trace_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     now = _utc_now()
-    signal = _extract_signal(payload)
+
+    canonical_payload = ensure_canonical_schema(payload)
+    signal = _extract_signal(canonical_payload)
+    trade_plan = _extract_trade_plan(canonical_payload)
 
     validation_block = (
         validation.get("validation", {})
@@ -127,40 +135,53 @@ def build_databricks_bronze_event(
     )
 
     return sanitize_for_json({
-        "event_uid": payload.get("event_uid"),
-        "schema_version": payload.get("schema_version"),
-        "message_type": payload.get("message_type"),
+        "event_uid": canonical_payload.get("event_uid"),
+        "schema_version": canonical_payload.get("schema_version"),
+        "message_type": canonical_payload.get("message_type"),
         "trace_id": trace_id,
 
         "symbol": (
             signal.get("symbol")
-            or payload.get("symbol")
-            or payload.get("ticker")
+            or canonical_payload.get("symbol")
+            or canonical_payload.get("ticker")
         ),
         "tf": (
             signal.get("tf")
-            or payload.get("tf")
-            or payload.get("timeframe")
+            or canonical_payload.get("tf")
+            or canonical_payload.get("timeframe")
         ),
         "event": (
             signal.get("event")
-            or payload.get("event")
+            or canonical_payload.get("event")
         ),
         "side": (
             signal.get("side")
-            or payload.get("side")
+            or canonical_payload.get("side")
         ),
         "price": (
             signal.get("price")
+            or signal.get("entry_price")
             or signal.get("close")
-            or payload.get("price")
+            or trade_plan.get("entry_price")
+            or canonical_payload.get("price")
         ),
+
+        "entry_price": (
+            signal.get("entry_price")
+            or trade_plan.get("entry_price")
+        ),
+        "tp_price": trade_plan.get("tp_price"),
+        "sl_price": trade_plan.get("sl_price"),
+        "tp_perc": trade_plan.get("tp_perc"),
+        "sl_perc": trade_plan.get("sl_perc"),
+        "rr_ratio": trade_plan.get("rr_ratio"),
 
         "validation_approve": validation_block.get("approve"),
         "validation_confidence": validation_block.get("confidence"),
         "probability_tp_before_sl": validation_block.get("probability_tp_before_sl"),
+        "score_external": validation_block.get("score_external"),
 
-        "raw_payload": payload,
+        "raw_payload": canonical_payload,
         "raw_validation": validation or {},
 
         "ingestion_ts": now.isoformat(),
@@ -168,7 +189,6 @@ def build_databricks_bronze_event(
         "source": "fastapi_trading_backend",
         "lakehouse_layer": "bronze",
     })
-
 
 def _export_local(
     payload: Dict[str, Any],
@@ -261,22 +281,24 @@ def export_event_for_databricks(
         }
 
     try:
+        canonical_payload = ensure_canonical_schema(payload)
+
         bronze_event = build_databricks_bronze_event(
-            payload=payload,
+            payload=canonical_payload,
             validation=validation,
             trace_id=trace_id,
         )
 
         if DATABRICKS_EXPORT_TARGET == "s3":
             return _export_s3(
-                payload=payload,
+                payload=canonical_payload,
                 bronze_event=bronze_event,
                 trace_id=trace_id,
             )
 
         if DATABRICKS_EXPORT_TARGET == "local":
             return _export_local(
-                payload=payload,
+                payload=canonical_payload,
                 bronze_event=bronze_event,
                 trace_id=trace_id,
             )
@@ -288,11 +310,14 @@ def export_event_for_databricks(
         }
 
     except Exception as e:
+        event_uid = payload.get("event_uid") if isinstance(payload, dict) else None
+        message_type = payload.get("message_type") if isinstance(payload, dict) else None
+
         log_event("databricks_export_error", {
             "trace_id": trace_id,
             "error": str(e),
-            "event_uid": payload.get("event_uid"),
-            "message_type": payload.get("message_type"),
+            "event_uid": event_uid,
+            "message_type": message_type,
             "target": DATABRICKS_EXPORT_TARGET,
         })
 
