@@ -466,6 +466,8 @@ async def run_validation(payload: Dict[str, Any]) -> Dict[str, Any]:
         "sl": prob.get("sl_price_used"),
         "rr": safe_float(normalized.get("rr_ratio_alert")),
         "probability_tp_before_sl": round(safe_float(prob.get("probability_tp_before_sl"), 0.0), 4),
+        "distance_to_tp_pct_alert": normalized.get("distance_to_tp_pct_alert"),
+        "distance_to_sl_pct_alert": normalized.get("distance_to_sl_pct_alert"),
         "probability_model": prob.get("probability_model"),
         "barrier_component": round(safe_float(prob.get("barrier_component"), 0.0), 4),
         "technical_component": round(safe_float(prob.get("technical_component"), 0.0), 4),
