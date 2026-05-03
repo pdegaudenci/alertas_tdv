@@ -225,6 +225,57 @@ def calculate_tp_sl_from_percent(
 
     return tp_existing, sl_existing
 
+def calculate_distance_pct(entry_price: Any, target_price: Any) -> Any:
+    entry = safe_float(entry_price)
+    target = safe_float(target_price)
+
+    if entry is None or entry <= 0 or target is None or target <= 0:
+        return None
+
+    return abs((target - entry) / entry) * 100.0
+
+
+def calculate_trigger_alignment(side: Any, trigger: Dict[str, Any]) -> Any:
+    """
+    Calcula una lectura simple de alineación si trigger_alignment no viene explícito.
+
+    Escala:
+    - 1.0 = alineación fuerte
+    - 0.5 = alineación parcial
+    - 0.0 = sin alineación clara
+    """
+    if not isinstance(trigger, dict):
+        return 0.0
+
+    existing = safe_float(trigger.get("trigger_alignment"))
+
+    if existing is not None and existing > 0:
+        return existing
+
+    side_txt = str(side or "").lower().strip()
+
+    if side_txt == "long":
+        points = 0
+        points += 1 if trigger.get("trigger_long") is True else 0
+        points += 1 if trigger.get("ast_bull") is True else 0
+        points += 1 if trigger.get("hull_bull") is True else 0
+        points += 1 if trigger.get("init_long_aligned") is True else 0
+        points += 1 if trigger.get("impulse_long") is True else 0
+
+        return round(points / 5.0, 4)
+
+    if side_txt == "short":
+        points = 0
+        points += 1 if trigger.get("trigger_short") is True else 0
+        points += 1 if trigger.get("ast_bear") is True else 0
+        points += 1 if trigger.get("hull_bear") is True else 0
+        points += 1 if trigger.get("init_short_aligned") is True else 0
+        points += 1 if trigger.get("impulse_short") is True else 0
+
+        return round(points / 5.0, 4)
+
+    return 0.0
+
 def ensure_canonical_schema(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
@@ -318,9 +369,24 @@ def ensure_canonical_schema(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     out["context"] = {
         **context,
-        "regime": first_non_empty(context.get("regime"), out.get("regime")),
-        "phase": first_non_empty(context.get("phase"), out.get("phase")),
-        "dir_state": context.get("dir_state"),
+        "regime": first_non_empty(
+            context.get("regime"),
+            context.get("raw_regime"),
+            out.get("regime"),
+            out.get("raw_regime"),
+        ),
+        "phase": first_non_empty(
+            context.get("phase"),
+            context.get("raw_phase"),
+            out.get("phase"),
+            out.get("raw_phase"),
+        ),
+        "dir_state": first_non_empty(
+            context.get("dir_state"),
+            context.get("regime_dir"),
+            out.get("dir_state"),
+            out.get("regime_dir"),
+        ),
         "mov_state": context.get("mov_state"),
         "liq_state": context.get("liq_state"),
     }
@@ -340,10 +406,12 @@ def ensure_canonical_schema(payload: Dict[str, Any]) -> Dict[str, Any]:
         "distance_to_tp_pct": first_non_empty(
             existing_trade_plan.get("distance_to_tp_pct"),
             execution.get("distance_to_tp_pct"),
+            calculate_distance_pct(canonical_entry_price, canonical_tp_price),
         ),
         "distance_to_sl_pct": first_non_empty(
             existing_trade_plan.get("distance_to_sl_pct"),
             execution.get("distance_to_sl_pct"),
+            calculate_distance_pct(canonical_entry_price, canonical_sl_price),
         ),
     }
 
@@ -467,16 +535,34 @@ def normalize_alert(payload: Dict[str, Any]) -> Dict[str, Any]:
     tp_price = safe_float(trade_plan.get("tp_price") or trade_plan.get("tp") or execution.get("tp_price"))
     sl_price = safe_float(trade_plan.get("sl_price") or trade_plan.get("sl") or execution.get("sl_price"))
 
-    if tp_price is None or sl_price is None:
-        side_for_calc = "LONG" if side == "long" else "SHORT" if side == "short" else None
-        tp_price, sl_price = calculate_tp_sl_from_percent(
-            side=side_for_calc,
-            entry_price=entry_price,
-            tp_price=tp_price,
-            sl_price=sl_price,
-            tp_perc=trade_plan.get("tp_perc"),
-            sl_perc=trade_plan.get("sl_perc"),
-        )
+    side_for_calc = "LONG" if side == "long" else "SHORT" if side == "short" else None
+
+    tp_price, sl_price = calculate_tp_sl_from_percent(
+        side=side_for_calc,
+        entry_price=entry_price,
+        tp_price=tp_price,
+        sl_price=sl_price,
+        tp_perc=trade_plan.get("tp_perc"),
+        sl_perc=trade_plan.get("sl_perc"),
+    )
+
+    distance_to_tp_pct_alert = safe_float(
+        trade_plan.get("distance_to_tp_pct")
+        or execution.get("distance_to_tp_pct")
+    )
+
+    distance_to_sl_pct_alert = safe_float(
+        trade_plan.get("distance_to_sl_pct")
+        or execution.get("distance_to_sl_pct")
+    )
+
+    if distance_to_tp_pct_alert is None:
+        distance_to_tp_pct_alert = calculate_distance_pct(entry_price, tp_price)
+
+    if distance_to_sl_pct_alert is None:
+        distance_to_sl_pct_alert = calculate_distance_pct(entry_price, sl_price)
+
+    trigger_alignment = calculate_trigger_alignment(side, trigger)
 
     return {
         "schema_version": canonical.get("schema_version", "unknown"),
@@ -510,9 +596,23 @@ def normalize_alert(payload: Dict[str, Any]) -> Dict[str, Any]:
         "quality_score_alert": safe_float(quality.get("quality_score") or canonical.get("quality_score")),
         "quality_class_alert": quality.get("quality_class"),
         "quality_approved_alert": bool(quality.get("quality_approved", False)),
-        "regime": context.get("regime"),
-        "phase": context.get("phase"),
-        "dir_state": context.get("dir_state"),
+        "regime": first_non_empty(
+            context.get("regime"),
+            context.get("raw_regime"),
+            canonical.get("regime"),
+            canonical.get("raw_regime"),
+        ),
+        "phase": first_non_empty(
+            context.get("phase"),
+            canonical.get("phase"),
+            canonical.get("raw_phase"),
+            htf_context.get("htf_phase"),
+        ),
+        "dir_state": first_non_empty(
+            context.get("dir_state"),
+            canonical.get("dir_state"),
+            context.get("regime_dir"),
+        ),
         "raw_dir_state": context.get("raw_dir_state"),
         "phase_strength": strength_to_score(context.get("phase_strength")),
         "regime_strength": strength_to_score(context.get("regime_strength")),
@@ -549,7 +649,7 @@ def normalize_alert(payload: Dict[str, Any]) -> Dict[str, Any]:
         "absorb_bear": bool(liquidity.get("absorb_bear", False)),
         "bars_since_sweep_low": safe_int(liquidity.get("bars_since_sweep_low"), 999),
         "bars_since_sweep_high": safe_int(liquidity.get("bars_since_sweep_high"), 999),
-        "trigger_alignment": safe_float(trigger.get("trigger_alignment")),
+        "trigger_alignment": trigger_alignment,
         "trigger_long": bool(trigger.get("trigger_long", False)),
         "trigger_short": bool(trigger.get("trigger_short", False)),
         "ast_dir": trigger.get("ast_dir"),
@@ -564,8 +664,8 @@ def normalize_alert(payload: Dict[str, Any]) -> Dict[str, Any]:
         "htf_phase_bias": htf_context.get("htf_phase_bias"),
         "htf_adx": safe_float(htf_context.get("htf_adx")),
         "rr_ratio_alert": safe_float(trade_plan.get("rr_ratio") or execution.get("rr_ratio")),
-        "distance_to_tp_pct_alert": safe_float(trade_plan.get("distance_to_tp_pct") or execution.get("distance_to_tp_pct")),
-        "distance_to_sl_pct_alert": safe_float(trade_plan.get("distance_to_sl_pct") or execution.get("distance_to_sl_pct")),
+        "distance_to_tp_pct_alert": distance_to_tp_pct_alert,
+        "distance_to_sl_pct_alert": distance_to_sl_pct_alert,
         "tp_perc_alert": safe_float(trade_plan.get("tp_perc")),
         "sl_perc_alert": safe_float(trade_plan.get("sl_perc")),
         "track_for_outcome": bool(
