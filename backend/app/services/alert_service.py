@@ -158,7 +158,6 @@ def infer_side_from_signal(signal: Dict[str, Any], payload: Dict[str, Any], even
 
     return None
 
-
 def calculate_tp_sl_from_percent(
     side: Any,
     entry_price: Any,
@@ -168,7 +167,12 @@ def calculate_tp_sl_from_percent(
     sl_perc: Any,
 ) -> tuple[Any, Any]:
     """
-    Calcula TP/SL si vienen null pero existen entry_price + tp_perc/sl_perc.
+    Calcula TP/SL si vienen null, vacío, 0 o inválidos,
+    pero existen entry_price + tp_perc/sl_perc.
+
+    Regla:
+    - Para LONG:  TP > entry y SL < entry.
+    - Para SHORT: TP < entry y SL > entry.
     """
     entry = safe_float(entry_price)
     tp_existing = safe_float(tp_price)
@@ -181,13 +185,27 @@ def calculate_tp_sl_from_percent(
 
     side_txt = str(side or "").upper().strip()
 
-    if tp_existing is None and tp_pct is not None:
+    tp_invalid = (
+        tp_existing is None
+        or tp_existing <= 0
+        or (side_txt == "LONG" and tp_existing <= entry)
+        or (side_txt == "SHORT" and tp_existing >= entry)
+    )
+
+    sl_invalid = (
+        sl_existing is None
+        or sl_existing <= 0
+        or (side_txt == "LONG" and sl_existing >= entry)
+        or (side_txt == "SHORT" and sl_existing <= entry)
+    )
+
+    if tp_invalid and tp_pct is not None and tp_pct > 0:
         if side_txt == "LONG":
             tp_existing = entry * (1.0 + tp_pct / 100.0)
         elif side_txt == "SHORT":
             tp_existing = entry * (1.0 - tp_pct / 100.0)
 
-    if sl_existing is None and sl_pct is not None:
+    if sl_invalid and sl_pct is not None and sl_pct > 0:
         if side_txt == "LONG":
             sl_existing = entry * (1.0 - sl_pct / 100.0)
         elif side_txt == "SHORT":
