@@ -3319,25 +3319,58 @@ Lakehouse Export Service
 Notification Service
 ```
 
-Estado final de esta fase:
+## Actualización de Lambda Container Image desde Docker + ECR
 
-```text
-VALIDADO:
-- SQS operativo
-- Lambda consumer operativo
-- fragment store operativo
-- ensamblado CORE + EXTRA operativo
-- validación ejecutándose desde Lambda
-- Supabase operativo
-- S3 Bronze operativo
-- Databricks Bronze/Silver/Gold operativo
+### 3. Build Docker local
 
-PENDIENTE / FUTURO:
-- endurecer IAM con permisos mínimos
-- separar Lambda assembler y Lambda validator si crece el volumen
-- añadir monitoreo CloudWatch más formal
-- definir alarmas sobre DLQ
-- automatizar jobs Databricks
-- construir labeling real de outcomes TP/SL
-- entrenar modelos ML sobre Gold
+Ejecutar desde la raíz del backend donde está el `Dockerfile`:
+
+```powershell
+docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
+```
+
+### 4. Tag de la imagen para ECR
+
+```powershell
+docker tag "$ECR_REPOSITORY:$IMAGE_TAG" "$ECR_URI"
+```
+
+### 5. Push de la imagen a ECR
+
+```powershell
+docker push "$ECR_URI"
+```
+
+### 6. Actualizar Lambda con la nueva imagen
+
+```powershell
+aws lambda update-function-code `
+  --function-name $LAMBDA_FUNCTION_NAME `
+  --image-uri $ECR_URI `
+  --region $AWS_REGION
+```
+
+### 7. Esperar actualización completa de Lambda
+
+```powershell
+aws lambda wait function-updated `
+  --function-name $LAMBDA_FUNCTION_NAME `
+  --region $AWS_REGION
+```
+
+### 8. Verificar versión/configuración actual de Lambda
+
+```powershell
+aws lambda get-function `
+  --function-name $LAMBDA_FUNCTION_NAME `
+  --region $AWS_REGION
+```
+
+### 9. Ver logs recientes de Lambda
+
+```powershell
+aws logs tail "/aws/lambda/$LAMBDA_FUNCTION_NAME" `
+  --region $AWS_REGION `
+  --follow
+```
 ```
