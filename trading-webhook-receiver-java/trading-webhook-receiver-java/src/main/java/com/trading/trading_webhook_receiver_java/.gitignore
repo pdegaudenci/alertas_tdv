@@ -1,0 +1,82 @@
+# ============================================================
+# Java / Maven / Spring Boot
+# ============================================================
+
+target/
+*.class
+*.jar
+*.war
+*.ear
+
+# Maven wrapper generated artifacts
+.mvn/wrapper/maven-wrapper.jar
+
+# ============================================================
+# Local configuration / secrets
+# ============================================================
+
+.env
+.env.*
+!.env.example
+
+src/main/resources/application-local.yml
+src/main/resources/application-dev.yml
+src/main/resources/application-secret.yml
+src/main/resources/application-secrets.yml
+
+# Keep example configs
+!src/main/resources/application-local.example.yml
+!src/main/resources/application.yml
+
+# ============================================================
+# IntelliJ IDEA
+# ============================================================
+
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# ============================================================
+# VS Code
+# ============================================================
+
+.vscode/
+
+# ============================================================
+# Eclipse / STS
+# ============================================================
+
+.project
+.classpath
+.settings/
+.springBeans
+.sts4-cache/
+
+# ============================================================
+# OS files
+# ============================================================
+
+.DS_Store
+Thumbs.db
+
+# ============================================================
+# Logs
+# ============================================================
+
+logs/
+*.log
+
+# ============================================================
+# Docker / local runtime
+# ============================================================
+
+docker-compose.override.yml
+
+# ============================================================
+# Test / coverage
+# ============================================================
+
+coverage/
+jacoco.exec

@@ -86,12 +86,32 @@ def _extract_partition_values(payload: Dict[str, Any]) -> dict:
         "message_type": _safe_partition_value(message_type),
     }
 
-def _build_relative_object_path(payload: Dict[str, Any]) -> str:
-    now = _utc_now()
-    p = _extract_partition_values(payload)
+def _build_event_filename(payload: Dict[str, Any]) -> str:
+    """
+    Construye nombre de archivo idempotente para S3/local.
 
-    event_uid = _safe_partition_value(payload.get("event_uid"), "no_event_uid")
-    filename = f"event_{event_uid}_{now.strftime('%Y%m%dT%H%M%S%f')}.jsonl"
+    Regla:
+    - Si existe event_uid, el nombre NO debe incluir timestamp.
+      Así, reintentos del mismo evento sobrescriben el mismo objeto.
+    - Si no existe event_uid, se usa timestamp como fallback para no pisar eventos desconocidos.
+    """
+
+    canonical_payload = ensure_canonical_schema(payload)
+
+    event_uid_raw = canonical_payload.get("event_uid")
+
+    if event_uid_raw:
+        event_uid = _safe_partition_value(event_uid_raw, "no_event_uid")
+        return f"event_{event_uid}.jsonl"
+
+    now = _utc_now()
+    return f"event_no_event_uid_{now.strftime('%Y%m%dT%H%M%S%f')}.jsonl"
+
+def _build_relative_object_path(payload: Dict[str, Any]) -> str:
+    canonical_payload = ensure_canonical_schema(payload)
+    p = _extract_partition_values(canonical_payload)
+
+    filename = _build_event_filename(canonical_payload)
 
     return "/".join([
         S3_BASE_PREFIX.strip("/"),
@@ -101,7 +121,6 @@ def _build_relative_object_path(payload: Dict[str, Any]) -> str:
         f"message_type={p['message_type']}",
         filename,
     ])
-
 
 def _build_local_partition_path(payload: Dict[str, Any]) -> str:
     p = _extract_partition_values(payload)
@@ -198,9 +217,7 @@ def _export_local(
     partition_path = _build_local_partition_path(payload)
     os.makedirs(partition_path, exist_ok=True)
 
-    now = _utc_now()
-    event_uid = _safe_partition_value(payload.get("event_uid"), "no_event_uid")
-    filename = f"event_{event_uid}_{now.strftime('%Y%m%dT%H%M%S%f')}.jsonl"
+    filename = _build_event_filename(payload)
     file_path = os.path.join(partition_path, filename)
 
     with open(file_path, "w", encoding="utf-8") as fh:

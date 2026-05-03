@@ -119,3 +119,16 @@ exports/
 trading_lakehouse/
 *.jsonl
 *.parquet
+
+# ============================================================
+# Java receiver local secrets
+# ============================================================
+
+trading-webhook-receiver-java/target/
+trading-webhook-receiver-java/src/main/resources/application-local.yml
+trading-webhook-receiver-java/.env
+trading-webhook-receiver-java/.env.*
+
+# IntelliJ
+.idea/
+*.iml
