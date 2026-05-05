@@ -1,0 +1,10 @@
+server:
+  port: 0
+
+trading:
+  webhook:
+    secret: MI_SECRET
+  aws:
+    region: eu-west-1
+    sqs:
+      queue-url: https://sqs.eu-west-1.amazonaws.com/221033227591/trading-alerts-queue
