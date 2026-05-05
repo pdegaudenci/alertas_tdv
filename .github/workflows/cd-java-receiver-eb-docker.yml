@@ -1,0 +1,176 @@
+#1. Build Java.
+#2. Build Docker image.
+#3. Push a ECR.
+#4. Genera Dockerrun.aws.json apuntando a esa imagen.
+#5. Sube bundle a S3 de Elastic Beanstalk.
+#6. Crea nueva application version.
+#7. Actualiza environment.
+#8. Health check post-deploy.
+#9. Rollback básico si falla health check.
+name: CD - Java Receiver Docker ECR Elastic Beanstalk
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "trading-webhook-receiver-java/**"
+      - ".github/workflows/cd-java-receiver-eb-docker.yml"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  ECR_REPOSITORY: ${{ vars.ECR_JAVA_RECEIVER_REPOSITORY }}
+  EB_APPLICATION_NAME: ${{ vars.EB_APPLICATION_NAME }}
+  EB_ENVIRONMENT_NAME: ${{ vars.EB_ENVIRONMENT_NAME }}
+  CONTAINER_PORT: "8080"
+
+jobs:
+  deploy-java-receiver:
+    name: Build Docker, Push ECR and Deploy EB
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Test Java receiver
+        working-directory: trading-webhook-receiver-java
+        run: |
+          chmod +x mvnw
+          ./mvnw test
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        working-directory: trading-webhook-receiver-java
+        run: |
+          IMAGE_TAG="${GITHUB_SHA}"
+          IMAGE_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_ENV
+          echo "IMAGE_URI=${IMAGE_URI}" >> $GITHUB_ENV
+
+          docker build -t "${IMAGE_URI}" .
+          docker push "${IMAGE_URI}"
+
+          echo "Pushed image: ${IMAGE_URI}"
+
+      - name: Get previous Elastic Beanstalk version for rollback
+        run: |
+          PREVIOUS_VERSION=$(aws elasticbeanstalk describe-environments \
+            --environment-names "${EB_ENVIRONMENT_NAME}" \
+            --query "Environments[0].VersionLabel" \
+            --output text)
+
+          echo "PREVIOUS_VERSION=${PREVIOUS_VERSION}" >> $GITHUB_ENV
+          echo "Previous EB version: ${PREVIOUS_VERSION}"
+
+      - name: Create Dockerrun.aws.json bundle
+        run: |
+          VERSION_LABEL="java-receiver-${GITHUB_SHA}"
+          echo "VERSION_LABEL=${VERSION_LABEL}" >> $GITHUB_ENV
+
+          rm -rf eb-bundle
+          mkdir eb-bundle
+
+          cat > eb-bundle/Dockerrun.aws.json <<EOF
+          {
+            "AWSEBDockerrunVersion": "1",
+            "Image": {
+              "Name": "${IMAGE_URI}",
+              "Update": "true"
+            },
+            "Ports": [
+              {
+                "ContainerPort": ${CONTAINER_PORT}
+              }
+            ]
+          }
+          EOF
+
+          cd eb-bundle
+          zip -r "../${VERSION_LABEL}.zip" .
+
+      - name: Upload EB bundle to S3
+        run: |
+          EB_BUCKET="elasticbeanstalk-${AWS_REGION}-${AWS_ACCOUNT_ID}"
+          EB_KEY="trading-webhook-receiver-java/${VERSION_LABEL}.zip"
+
+          echo "EB_BUCKET=${EB_BUCKET}" >> $GITHUB_ENV
+          echo "EB_KEY=${EB_KEY}" >> $GITHUB_ENV
+
+          aws s3 cp "${VERSION_LABEL}.zip" "s3://${EB_BUCKET}/${EB_KEY}"
+
+      - name: Create Elastic Beanstalk application version
+        run: |
+          aws elasticbeanstalk create-application-version \
+            --application-name "${EB_APPLICATION_NAME}" \
+            --version-label "${VERSION_LABEL}" \
+            --source-bundle S3Bucket="${EB_BUCKET}",S3Key="${EB_KEY}"
+
+      - name: Deploy Elastic Beanstalk application version
+        run: |
+          aws elasticbeanstalk update-environment \
+            --environment-name "${EB_ENVIRONMENT_NAME}" \
+            --version-label "${VERSION_LABEL}"
+
+      - name: Wait for Elastic Beanstalk update
+        run: |
+          aws elasticbeanstalk wait environment-updated \
+            --environment-names "${EB_ENVIRONMENT_NAME}"
+
+      - name: Post-deploy health check
+        id: healthcheck
+        run: |
+          CNAME=$(aws elasticbeanstalk describe-environments \
+            --environment-names "${EB_ENVIRONMENT_NAME}" \
+            --query "Environments[0].CNAME" \
+            --output text)
+
+          echo "CNAME=${CNAME}" >> $GITHUB_ENV
+          echo "Testing health: http://${CNAME}/actuator/health"
+
+          for i in {1..10}; do
+            if curl -f "http://${CNAME}/actuator/health"; then
+              echo "Health check OK"
+              exit 0
+            fi
+
+            echo "Health check failed. Retry $i/10..."
+            sleep 10
+          done
+
+          echo "Health check failed after retries"
+          exit 1
+
+      - name: Rollback Elastic Beanstalk on failure
+        if: failure()
+        run: |
+          if [ -n "${PREVIOUS_VERSION}" ] && [ "${PREVIOUS_VERSION}" != "None" ]; then
+            echo "Rolling back to previous version: ${PREVIOUS_VERSION}"
+
+            aws elasticbeanstalk update-environment \
+              --environment-name "${EB_ENVIRONMENT_NAME}" \
+              --version-label "${PREVIOUS_VERSION}"
+          else
+            echo "No previous version available for rollback"
+          fi
