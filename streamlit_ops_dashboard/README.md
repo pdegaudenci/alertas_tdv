@@ -42,8 +42,8 @@ A Streamlit-based operational dashboard for monitoring the trading system's heal
 4. **Required Environment Variables**:
    ```env
    AWS_REGION=eu-west-1
-   AWS_SQS_QUEUE_URL=https://sqs.eu-west-1.amazonaws.com/123456789012/trading-alerts-queue
-   AWS_SQS_DLQ_URL=https://sqs.eu-west-1.amazonaws.com/123456789012/trading-alerts-dlq
+   AWS_SQS_QUEUE_URL=trading-alerts-queue
+   AWS_SQS_DLQ_URL=
    AWS_S3_BUCKET=trading-lakehouse-btc-s3
    AWS_S3_BRONZE_PREFIX=bronze/trading_alerts/
    AWS_LAMBDA_FUNCTION_NAME=trading-alerts-consumer-container
@@ -51,7 +51,7 @@ A Streamlit-based operational dashboard for monitoring the trading system's heal
    SUPABASE_URL=https://your-project.supabase.co
    SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 
-   JAVA_RECEIVER_BASE_URL=http://trading-webhook-receiver-java.eu-west-1.elasticbeanstalk.com
+   JAVA_RECEIVER_BASE_URL=
    ```
 
 ## Running Locally
